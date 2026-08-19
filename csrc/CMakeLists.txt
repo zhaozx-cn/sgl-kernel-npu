@@ -31,6 +31,7 @@ FILE(GLOB OP_SRCS
     ${PROJECT_OP_SRC_BASE}/apply_token_bitmask/op_host/apply_token_bitmask.cpp
     ${PROJECT_OP_SRC_BASE}/sparse_attention_score/op_host/sparse_attention_score.cpp
     ${PROJECT_OP_SRC_BASE}/sparse_attention_score/op_host/tiling/sparse_attention_score_tiling.cpp
+    ${PROJECT_OP_SRC_BASE}/chunk_gated_delta_rule/op_host/chunk_gated_delta_rule.cpp
     )
 if(BUILD_CATLASS_MODULE)
     list(APPEND OP_SRCS
@@ -92,6 +93,16 @@ set(WORKSPACE_KERNEL_SRCS
     ${PROJECT_OP_SRC_BASE}/lora/op_kernel/sgemmc_shrink_kernel.cpp
     ${PROJECT_OP_SRC_BASE}/sparse_attention_score/op_kernel/sparse_attention_score.cpp
 )
+# chunk_gated_delta_rule: select arch22 (Ascend910_93 / A3) or arch35 (Ascend950 / A5) entry
+if(SOC_VERSION STREQUAL "Ascend950")
+    list(APPEND WORKSPACE_KERNEL_SRCS
+        ${PROJECT_OP_SRC_BASE}/chunk_gated_delta_rule/op_kernel/chunk_gated_delta_rule_apt.cpp
+    )
+else()
+    list(APPEND WORKSPACE_KERNEL_SRCS
+        ${PROJECT_OP_SRC_BASE}/chunk_gated_delta_rule/op_kernel/chunk_gated_delta_rule.cpp
+    )
+endif()
 if(BUILD_CATLASS_MODULE)
     list(APPEND WORKSPACE_KERNEL_SRCS
         ${PROJECT_OP_SRC_BASE}/catlass/op_kernel/catlass_matmul_basic_kernel.cpp
@@ -102,6 +113,7 @@ ascendc_include_directories(workspace_kernel PRIVATE
     ${PROJECT_OP_SRC_BASE}/causal_conv1d_update/op_kernel
     ${PROJECT_OP_SRC_BASE}/causal_conv1d/op_kernel
     ${PROJECT_OP_SRC_BASE}/sparse_attention_score/op_kernel
+    ${PROJECT_OP_SRC_BASE}/chunk_gated_delta_rule/op_kernel
 )
 if(BUILD_CATLASS_MODULE)
     ascendc_include_directories(workspace_kernel PRIVATE

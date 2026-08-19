@@ -121,6 +121,11 @@ TORCH_LIBRARY_FRAGMENT(npu, m)
         "int seq_len, int total_tokens, int num_matrices) -> ()");
 
     m.def(
+        "chunk_gated_delta_rule(Tensor query, Tensor key, Tensor value, *, Tensor? beta=None, "
+        "Tensor? initial_state=None, Tensor? actual_seq_lengths=None, float? scale=None, "
+        "Tensor? g=None) -> (Tensor, Tensor)");
+
+    m.def(
         "npu_sparse_attention_score(Tensor query, Tensor key, Tensor value, Tensor select_idx, "
         "Tensor block_table, Tensor? select_num_idx=None, Tensor? q_dequant_scale=None, "
         "Tensor? k_dequant_scale=None, Tensor? v_dequant_scale=None, "
@@ -209,6 +214,8 @@ TORCH_LIBRARY_IMPL(npu, PrivateUse1, m)
 
     m.impl("lightning_indexer", TORCH_FN(sglang::npu_kernel::lightning_indexer));
     m.impl("npu_sparse_attention_score", TORCH_FN(sglang::npu_kernel::sparse_attention_score));
+
+    m.impl("chunk_gated_delta_rule", TORCH_FN(sglang::npu_kernel::chunk_gated_delta_rule));
 
     m.impl("triangular_inverse", TORCH_FN(sglang::npu_kernel::tri_inv_col_sweep));
 
