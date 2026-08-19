@@ -123,7 +123,7 @@ TORCH_LIBRARY_FRAGMENT(npu, m)
     m.def(
         "chunk_gated_delta_rule(Tensor query, Tensor key, Tensor value, *, Tensor? beta=None, "
         "Tensor? initial_state=None, Tensor? actual_seq_lengths=None, float? scale=None, "
-        "Tensor? g=None) -> (Tensor, Tensor)");
+        "Tensor? g=None, Tensor(c!)? chunk_state=None) -> (Tensor, Tensor)");
 
     m.def(
         "npu_sparse_attention_score(Tensor query, Tensor key, Tensor value, Tensor select_idx, "
