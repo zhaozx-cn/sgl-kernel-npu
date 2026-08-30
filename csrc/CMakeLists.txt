@@ -45,6 +45,7 @@ set(OP_SRCS
     ${PROJECT_OP_SRC_BASE}/sparse_attn_sharedkv_metadata/op_host/sparse_attn_sharedkv_metadata.cpp
     ${PROJECT_OP_SRC_BASE}/sparse_attention_score/op_host/sparse_attention_score.cpp
     ${PROJECT_OP_SRC_BASE}/sparse_attention_score/op_host/tiling/sparse_attention_score_tiling.cpp
+    ${PROJECT_OP_SRC_BASE}/chunk_kda_fwd/op_host/chunk_kda_fwd.cpp
     )
 # A3-only host sources
 if(SGL_KERNEL_ENABLE_A3_ONLY_OPS)
@@ -167,6 +168,28 @@ if(BUILD_CATLASS_MODULE)
     set(CATLASS_WORKSPACE_KERNEL_TARGETS catlass_workspace_kernel)
 endif()
 
+# chunk_kda_fwd kernel target: built on both A3 (arch22) and A5 (arch35).
+# Its catlass/tla headers are vendored inside the op dir, so keep it in a
+# dedicated target to avoid header collisions with workspace_kernel.
+ascendc_library(chunk_kda_fwd_kernel STATIC
+    ${PROJECT_OP_SRC_BASE}/chunk_kda_fwd/op_kernel/chunk_kda_fwd.cpp
+)
+ascendc_include_directories(chunk_kda_fwd_kernel PRIVATE
+    ${PROJECT_OP_SRC_BASE}/chunk_kda_fwd/op_kernel
+)
+ascendc_compile_definitions(chunk_kda_fwd_kernel PRIVATE
+    -DCATLASS_EPILOGUE_BLOCK_EPILOGUE_DEQUANT_HPP
+)
+ascendc_compile_options(chunk_kda_fwd_kernel PRIVATE
+    --cce-auto-sync=off
+    -Wno-deprecated-declarations
+)
+if(_sgl_soc_lower MATCHES "^ascend950")
+    ascendc_compile_definitions(chunk_kda_fwd_kernel PRIVATE
+        -DENABLE_CV_COMM_VIA_SSBUF=true
+    )
+endif()
+
 # Dedicated A3-only kernel targets. Keep these separate from workspace_kernel:
 # their compiler definitions/options apply to the whole AscendC target.
 set(A3_ONLY_KERNEL_TARGETS)
@@ -214,6 +237,7 @@ add_library(${OP_PLUGIN_NAME} SHARED ${OP_SRCS})
 
 target_link_libraries(${OP_PLUGIN_NAME} PRIVATE
         ${A3_ONLY_KERNEL_TARGETS}
+        chunk_kda_fwd_kernel
         workspace_kernel
         no_workspace_kernel
         ${CATLASS_WORKSPACE_KERNEL_TARGETS}

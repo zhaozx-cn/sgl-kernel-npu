@@ -239,6 +239,54 @@ at::Tensor sparse_attn_sharedkv_metadata_host(
     int64_t cmp_mask_mode, int64_t ori_win_left, int64_t ori_win_right,
     bool has_ori_kv, bool has_cmp_kv);
 
+/**
+ * @brief Fused chunk KDA forward: computes the attention output, the final
+ * state and optional backward intermediates.
+ *
+ * @param [in] q (B, S, H, K) / (B, H, S, K) / (T, H, K) / (H, T, K)
+ * bfloat16, layout-dependent.
+ * @param [in] k Same shape as q.
+ * @param [in] v Value tensor, layout-dependent, bfloat16.
+ * @param [in] g Raw gate (or activated natural-log gate), float32/bfloat16,
+ * layout-dependent.
+ * @param [in] beta Delta coefficient, float32/bfloat16, layout-dependent.
+ * @param [in] a_log (HV,) float32 gate decay parameter, required when
+ * use_gate_in_kernel is true.
+ * @param [in] dt_bias (HV*K,) float32 gate bias.
+ * @param [in] initial_state (N, HV, K, V) (or (N, HV, V, K) when
+ * state_v_first) float32.
+ * @param [in] cu_seqlens (N+1,) int64 varlen sequence boundaries.
+ * @param [in] chunk_indices (2*NC,) int64 canonical (seq_id, chunk_id) pairs.
+ * @param [in] layout One of "BSND", "BNSD", "TND", "NTD".
+ * @param [in] scale Query scaling factor, usually K^(-0.5).
+ * @param [in] chunk_size 64 or 128.
+ * @param [in] safe_gate Whether to use a bounded gate.
+ * @param [in] lower_bound Safe gate lower bound in [-5, 0).
+ * @param [in] use_gate_in_kernel Whether to compute the activated gate
+ * in-kernel.
+ * @param [in] state_v_first Whether the state tensors have (V, K) last two
+ * dims.
+ * @param [in] output_final_state/output_gk/output_w/output_u/output_qg/
+ * output_kg/output_v_new/output_h Whether to materialize the corresponding
+ * optional output.
+ * @return Tuple of 11 tensors (undefined tensors for non-requested optional
+ * outputs): attn_out, final_state, gk, aqk, akk, w, u, qg, kg, v_new, h.
+ */
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor,
+           at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor,
+           at::Tensor> chunk_kda_fwd(
+    const at::Tensor &q, const at::Tensor &k, const at::Tensor &v,
+    const at::Tensor &g, const at::Tensor &beta,
+    const c10::optional<at::Tensor> &a_log,
+    const c10::optional<at::Tensor> &dt_bias,
+    const c10::optional<at::Tensor> &initial_state,
+    const c10::optional<at::Tensor> &cu_seqlens,
+    const c10::optional<at::Tensor> &chunk_indices, c10::string_view layout,
+    double scale, int64_t chunk_size, bool safe_gate, double lower_bound,
+    bool use_gate_in_kernel, bool state_v_first, bool output_final_state,
+    bool output_gk, bool output_w, bool output_u, bool output_qg,
+    bool output_kg, bool output_v_new, bool output_h);
+
 } // namespace npu_kernel
 
 } // namespace sglang

@@ -193,6 +193,18 @@ TORCH_LIBRARY_FRAGMENT(npu, m)
         "bool has_ori_kv=True, bool has_cmp_kv=True) -> Tensor");
 #endif
 
+    m.def(
+        "chunk_kda_fwd(Tensor q, Tensor k, Tensor v, Tensor g, Tensor beta, "
+        "Tensor? a_log=None, Tensor? dt_bias=None, Tensor? initial_state=None, "
+        "Tensor? cu_seqlens=None, Tensor? chunk_indices=None, "
+        "str layout='BSND', float scale=1.0, int chunk_size=64, "
+        "bool safe_gate=False, float lower_bound=-5.0, "
+        "bool use_gate_in_kernel=False, bool state_v_first=False, "
+        "bool output_final_state=True, bool output_gk=False, bool output_w=False, "
+        "bool output_u=False, bool output_qg=False, bool output_kg=False, "
+        "bool output_v_new=False, bool output_h=False) "
+        "-> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)");
+
 #ifdef BUILD_CATLASS_MODULE
     m.def("catlass_matmul_basic(Tensor tensor_a, Tensor tensor_b, Tensor(a!) tensor_c, str? format_mode=None) -> ()");
 
@@ -308,6 +320,8 @@ TORCH_LIBRARY_IMPL(npu, PrivateUse1, m)
             has_initial_state_or_empty, num_accepted_tokens_or_empty, activation_mode, pad_slot_id, run_mode);
     });
 #endif
+
+    m.impl("chunk_kda_fwd", TORCH_FN(sglang::npu_kernel::chunk_kda_fwd));
 
 #ifdef BUILD_CATLASS_MODULE
     m.impl("catlass_matmul_basic", TORCH_FN(sglang::npu_kernel::catlass_matmul_basic));
