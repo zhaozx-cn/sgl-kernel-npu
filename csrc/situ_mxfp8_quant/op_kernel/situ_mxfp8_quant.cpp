@@ -162,7 +162,8 @@ private:
         quant::ComputeScale<fp8_e4m3fn_t>(max_exp, mx_scale, half_scale, SCALE_COLS);
         quant::ComputeFp8Data<bfloat16_t, fp8_e4m3fn_t, RoundMode::CAST_TRUNC, RoundMode::CAST_RINT>(
             src, half_scale, out, OUTPUT_COLS);
-        PipeBarrier<PIPE_V>();
+        SetFlag<HardEvent::V_MTE3>(0);
+        WaitFlag<HardEvent::V_MTE3>(0);
 
         const uint64_t payload_offset = static_cast<uint64_t>(row) * OUTPUT_COLS;
         const uint64_t scale_offset = static_cast<uint64_t>(row) * SCALE_COLS;
