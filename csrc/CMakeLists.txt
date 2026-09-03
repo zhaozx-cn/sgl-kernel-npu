@@ -81,6 +81,7 @@ endif()
 if(SGL_KERNEL_ENABLE_A5_ONLY_OPS)
     list(APPEND OP_SRCS
         ${PROJECT_OP_SRC_BASE}/kv_compress_epilog/op_host/kv_compress_epilog.cpp
+        ${PROJECT_OP_SRC_BASE}/situ_mxfp8_quant/op_host/situ_mxfp8_quant.cpp
     )
 endif()
 if(BUILD_CATLASS_MODULE)
@@ -113,6 +114,12 @@ set(NO_WORKSPACE_KERNEL_SRCS
     ${PROJECT_OP_SRC_BASE}/lora/op_kernel/sgemmv_shrink_kernel.cpp
     ${PROJECT_OP_SRC_BASE}/apply_token_bitmask/op_kernel/apply_token_bitmask.cpp
 )
+# A5-only no-workspace kernels
+if(SGL_KERNEL_ENABLE_A5_ONLY_OPS)
+    list(APPEND NO_WORKSPACE_KERNEL_SRCS
+        ${PROJECT_OP_SRC_BASE}/situ_mxfp8_quant/op_kernel/situ_mxfp8_quant.cpp
+    )
+endif()
 # A3-only no-workspace kernels
 if(SGL_KERNEL_ENABLE_A3_ONLY_OPS)
     list(APPEND NO_WORKSPACE_KERNEL_SRCS
@@ -134,6 +141,9 @@ endif()
 ascendc_library(no_workspace_kernel STATIC ${NO_WORKSPACE_KERNEL_SRCS})
 ascendc_include_directories(no_workspace_kernel PRIVATE
     ${PROJECT_OP_SRC_BASE}/utils/kernel
+    ${PROJECT_OP_SRC_BASE}/situ_mxfp8_quant/op_kernel
+    ${PROJECT_OP_SRC_BASE}/deepep/ops/op_kernel
+    ${PROJECT_OP_SRC_BASE}/deepep/ops/op_kernel/fused_deep_moe_a5/fused_deep_moe/gemm/kernel
 )
 if(BUILD_CATLASS_MODULE)
     ascendc_include_directories(no_workspace_kernel PRIVATE

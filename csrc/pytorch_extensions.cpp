@@ -202,6 +202,9 @@ TORCH_LIBRARY_FRAGMENT(npu, m)
     m.def(
         "kv_compress_epilog(Tensor(a!) kv_compress_cache, Tensor x, Tensor slot_mapping, "
         "int quant_group_size, int quant_mode, bool round_scale_flag, int layout) -> ()");
+    m.def(
+        "situ_mxfp8_quant(Tensor x, Tensor group_list, int group_list_type=1, "
+        "float beta=4.0, float linear_beta=25.0) -> (Tensor, Tensor)");
 #endif
 
 #ifdef BUILD_CATLASS_MODULE
@@ -338,6 +341,7 @@ TORCH_LIBRARY_IMPL(npu, PrivateUse1, m)
 
 #ifdef SGL_KERNEL_ENABLE_A5_ONLY_OPS
     m.impl("kv_compress_epilog", TORCH_FN(sglang::npu_kernel::kv_compress_epilog));
+    m.impl("situ_mxfp8_quant", TORCH_FN(sglang::npu_kernel::situ_mxfp8_quant));
 #endif
 
 #ifdef BUILD_CATLASS_MODULE

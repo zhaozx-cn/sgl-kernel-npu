@@ -194,6 +194,10 @@ void kv_compress_epilog(at::Tensor &kv_compress_cache, const at::Tensor &x,
                         const at::Tensor &slot_mapping,
                         int64_t quant_group_size, int64_t quant_mode,
                         bool round_scale_flag, int64_t layout);
+
+std::tuple<at::Tensor, at::Tensor> situ_mxfp8_quant(
+    const at::Tensor &x, const at::Tensor &group_list,
+    int64_t group_list_type, double beta, double linear_beta);
 #endif
 
 #ifdef BUILD_CATLASS_MODULE
