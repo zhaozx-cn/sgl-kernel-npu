@@ -49,11 +49,15 @@ HOST_API std::tuple<at::Tensor, at::Tensor> situ_mxfp8_quant(
     }
     block_dim = std::min<uint32_t>(block_dim, static_cast<uint32_t>(rows));
 
-    const uint32_t group_dtype = group_list.scalar_type() == at::kLong ? 1U : 0U;
+    uint32_t capacity_rows = static_cast<uint32_t>(rows);
+    uint32_t num_experts = static_cast<uint32_t>(group_list.numel());
+    uint32_t group_list_type_u32 = static_cast<uint32_t>(group_list_type);
+    uint32_t group_dtype = group_list.scalar_type() == at::kLong ? 1U : 0U;
+    float beta_f32 = static_cast<float>(beta);
+    float linear_beta_f32 = static_cast<float>(linear_beta);
     EXEC_KERNEL_CMD(situ_mxfp8_quant, block_dim, x, group_list, payload, scales,
-                    static_cast<uint32_t>(rows), static_cast<uint32_t>(group_list.numel()),
-                    static_cast<uint32_t>(group_list_type), group_dtype,
-                    static_cast<float>(beta), static_cast<float>(linear_beta));
+                    capacity_rows, num_experts, group_list_type_u32, group_dtype,
+                    beta_f32, linear_beta_f32);
     return std::make_tuple(payload, scales);
 }
 
