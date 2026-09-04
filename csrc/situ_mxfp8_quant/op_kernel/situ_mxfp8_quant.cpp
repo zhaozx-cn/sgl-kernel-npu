@@ -143,7 +143,7 @@ private:
 
         quant::ComputeMaxExp(src, max_exp, OUTPUT_COLS);
         quant::ComputeScale<fp8_e4m3fn_t>(max_exp, mx_scale, half_scale, SCALE_COLS);
-        quant::ComputeFp8Data<bfloat16_t, fp8_e4m3fn_t, RoundMode::CAST_TRUNC, RoundMode::CAST_RINT>(
+        quant::ComputeFp8Data<bfloat16_t, fp8_e4m3fn_t, RoundMode::CAST_TRUNC, RoundMode::CAST_RINT, true>(
             src, half_scale, out, OUTPUT_COLS);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
