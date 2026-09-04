@@ -88,8 +88,11 @@ private:
                                       float multiplier, float inverse_multiplier)
     {
         Muls(dst, dst, inverse_multiplier, OUTPUT_COLS);
+        PipeBarrier<PIPE_V>();
         Maxs(dst, dst, -static_cast<float>(EXP_CLAMP), OUTPUT_COLS);
+        PipeBarrier<PIPE_V>();
         Mins(dst, dst, static_cast<float>(EXP_CLAMP), OUTPUT_COLS);
+        PipeBarrier<PIPE_V>();
         Muls(work, dst, -2.0f, OUTPUT_COLS);
         PipeBarrier<PIPE_V>();
         Exp(work, work, OUTPUT_COLS);
@@ -126,11 +129,15 @@ private:
 
         // beta*tanh(gate/beta) * sigmoid(gate)
         Muls(tanh_value, gate, 1.0f, OUTPUT_COLS);
+        PipeBarrier<PIPE_V>();
         StableTanh(tanh_value, work, beta_, inv_beta_);
         PipeBarrier<PIPE_V>();
         Muls(work, gate, -1.0f, OUTPUT_COLS);
+        PipeBarrier<PIPE_V>();
         Maxs(work, work, -static_cast<float>(EXP_CLAMP), OUTPUT_COLS);
+        PipeBarrier<PIPE_V>();
         Mins(work, work, static_cast<float>(EXP_CLAMP), OUTPUT_COLS);
+        PipeBarrier<PIPE_V>();
         Exp(work, work, OUTPUT_COLS);
         PipeBarrier<PIPE_V>();
         Adds(work, work, 1.0f, OUTPUT_COLS);
