@@ -17,7 +17,6 @@ constexpr uint32_t INPUT_COLS = 6144;
 constexpr uint32_t OUTPUT_COLS = 3072;
 constexpr uint32_t SCALE_COLS = OUTPUT_COLS / 32;
 constexpr uint32_t FLOAT_OVERFLOW_MODE_CTRL = 60;
-constexpr uint32_t EXP_CLAMP = 20;
 
 template <typename GroupType>
 class SituMxFp8Quant
@@ -47,7 +46,6 @@ public:
         pipe_.InitBuffer(gate_buf_, OUTPUT_COLS * sizeof(float));
         pipe_.InitBuffer(up_buf_, OUTPUT_COLS * sizeof(float));
         pipe_.InitBuffer(tanh_buf_, OUTPUT_COLS * sizeof(float));
-        pipe_.InitBuffer(work_buf_, OUTPUT_COLS * sizeof(float));
     }
 
     __aicore__ inline void Process()
@@ -84,26 +82,17 @@ private:
         return total > 0 ? static_cast<uint32_t>(total) : 0U;
     }
 
-    __aicore__ inline void StableTanh(LocalTensor<float> &dst, LocalTensor<float> &work,
-                                      float multiplier, float inverse_multiplier)
+    __aicore__ inline void StableTanh(LocalTensor<float> &dst, float multiplier, float inverse_multiplier)
     {
-        Muls(dst, dst, inverse_multiplier, OUTPUT_COLS);
+        // tanh(x) = 2 * sigmoid(2x) - 1. AscendC's sigmoid primitive avoids
+        // non-finite intermediates from a hand-written exp/div sequence.
+        Muls(dst, dst, 2.0f * inverse_multiplier, OUTPUT_COLS);
         PipeBarrier<PIPE_V>();
-        Maxs(dst, dst, -static_cast<float>(EXP_CLAMP), OUTPUT_COLS);
+        Sigmoid<float, false>(dst, dst, OUTPUT_COLS);
         PipeBarrier<PIPE_V>();
-        Mins(dst, dst, static_cast<float>(EXP_CLAMP), OUTPUT_COLS);
+        Muls(dst, dst, 2.0f * multiplier, OUTPUT_COLS);
         PipeBarrier<PIPE_V>();
-        Muls(work, dst, -2.0f, OUTPUT_COLS);
-        PipeBarrier<PIPE_V>();
-        Exp(work, work, OUTPUT_COLS);
-        PipeBarrier<PIPE_V>();
-        Adds(work, work, 1.0f, OUTPUT_COLS);
-        Duplicate(dst, 2.0f, OUTPUT_COLS);
-        PipeBarrier<PIPE_V>();
-        Div(dst, dst, work, OUTPUT_COLS);
-        PipeBarrier<PIPE_V>();
-        Adds(dst, dst, -1.0f, OUTPUT_COLS);
-        Muls(dst, dst, multiplier, OUTPUT_COLS);
+        Adds(dst, dst, -multiplier, OUTPUT_COLS);
     }
 
     __aicore__ inline void ProcessRow(uint32_t row)
@@ -116,7 +105,6 @@ private:
         auto gate = gate_buf_.Get<float>();
         auto up = up_buf_.Get<float>();
         auto tanh_value = tanh_buf_.Get<float>();
-        auto work = work_buf_.Get<float>();
 
         const uint64_t input_offset = static_cast<uint64_t>(row) * INPUT_COLS;
         DataCopy(input, x_gm_[input_offset], INPUT_COLS);
@@ -130,26 +118,14 @@ private:
         // beta*tanh(gate/beta) * sigmoid(gate)
         Muls(tanh_value, gate, 1.0f, OUTPUT_COLS);
         PipeBarrier<PIPE_V>();
-        StableTanh(tanh_value, work, beta_, inv_beta_);
+        StableTanh(tanh_value, beta_, inv_beta_);
         PipeBarrier<PIPE_V>();
-        Muls(work, gate, -1.0f, OUTPUT_COLS);
-        PipeBarrier<PIPE_V>();
-        Maxs(work, work, -static_cast<float>(EXP_CLAMP), OUTPUT_COLS);
-        PipeBarrier<PIPE_V>();
-        Mins(work, work, static_cast<float>(EXP_CLAMP), OUTPUT_COLS);
-        PipeBarrier<PIPE_V>();
-        Exp(work, work, OUTPUT_COLS);
-        PipeBarrier<PIPE_V>();
-        Adds(work, work, 1.0f, OUTPUT_COLS);
-        PipeBarrier<PIPE_V>();
-        Duplicate(gate, 1.0f, OUTPUT_COLS);
-        PipeBarrier<PIPE_V>();
-        Div(gate, gate, work, OUTPUT_COLS);
+        Sigmoid<float, false>(gate, gate, OUTPUT_COLS);
         PipeBarrier<PIPE_V>();
         Mul(gate, gate, tanh_value, OUTPUT_COLS);
 
         // linear_beta*tanh(up/linear_beta)
-        StableTanh(up, work, linear_beta_, inv_linear_beta_);
+        StableTanh(up, linear_beta_, inv_linear_beta_);
         PipeBarrier<PIPE_V>();
         Mul(gate, gate, up, OUTPUT_COLS);
         PipeBarrier<PIPE_V>();
@@ -183,7 +159,7 @@ private:
 private:
     TPipe pipe_;
     TBuf<TPosition::VECCALC> input_buf_, result_buf_, payload_buf_, scales_buf_, quant_tmp_buf_;
-    TBuf<TPosition::VECCALC> gate_buf_, up_buf_, tanh_buf_, work_buf_;
+    TBuf<TPosition::VECCALC> gate_buf_, up_buf_, tanh_buf_;
     GlobalTensor<bfloat16_t> x_gm_;
     GlobalTensor<GroupType> group_list_gm_;
     GlobalTensor<fp8_e4m3fn_t> payload_gm_;
