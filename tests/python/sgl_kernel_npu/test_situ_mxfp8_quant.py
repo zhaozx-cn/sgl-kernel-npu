@@ -51,7 +51,11 @@ def _run_case(group_list_type, dtype):
 
     actual = _dequant(payload[:valid], scales[:valid])
     expected = _dequant(ref_payload, ref_scales)
-    torch.testing.assert_close(actual, expected, rtol=0.08, atol=0.08)
+    # E4M3FN reserves its all-ones magnitude encoding for NaN. The vendor
+    # quantizer may emit that encoding at the rounding boundary, so compare
+    # the NaN locations first and then treat matching NaNs as equal.
+    torch.testing.assert_close(torch.isnan(actual), torch.isnan(expected))
+    torch.testing.assert_close(actual, expected, rtol=0.08, atol=0.08, equal_nan=True)
 
 
 def test_count_int64():
