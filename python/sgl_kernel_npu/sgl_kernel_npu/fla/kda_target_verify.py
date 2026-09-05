@@ -21,18 +21,19 @@ def kda_target_verify_npu(
     intermediate_state_indices: torch.Tensor,
     cache_steps: int,
     scale: Optional[float] = None,
-    gates_are_preactivated: Optional[bool] = None,
+    safe_gate: bool = False,
+    lower_bound: float = -5.0,
 ) -> torch.Tensor:
     """KDA fixed-width target verification backed by the AscendC recurrent_kda kernel.
 
-    Replaces the previous Triton implementation with the fused C++ operator
-    from sgl-kernel-npu. The persistent and intermediate state layout is the
-    Ascend KDA layout ``[..., H_v, V, K]``.
+    The kernel applies the full gate contract internally
+    (``exp(-exp(A_log) * softplus(a + dt_bias))`` when safe_gate=False,
+    ``lower_bound * sigmoid(-exp(A_log) * (a + dt_bias))`` when safe_gate=True)
+    and ``sigmoid(b)`` in-kernel, so callers must pass the *raw* (un-preactivated)
+    gate ``a`` and beta ``b`` together with ``A_log`` and ``dt_bias``.
 
-    When ``gates_are_preactivated`` is true, ``a`` is the log-decay
-    ``-exp(A_log) * softplus(raw_a + dt_bias)`` and ``b`` is already sigmoid
-    activated. The recurrent_kda kernel with ``use_gate_in_kernel=False``
-    applies ``exp(a)`` to recover the decay factor.
+    The persistent and intermediate state layout is the Ascend KDA layout
+    ``[..., H_v, V, K]``.
     """
     if q.ndim != 4 or k.ndim != 4 or v.ndim != 4:
         raise ValueError("q, k, and v must have shape [1, tokens, heads, dim]")
@@ -47,12 +48,9 @@ def kda_target_verify_npu(
     h_q, key_dim = q.shape[2:]
     h_k = k.shape[2]
     h_v, value_dim = v.shape[2:]
-    a_has_leading_singleton = a.ndim == 4
-    b_has_leading_singleton = b.ndim == 3
-    if a_has_leading_singleton != b_has_leading_singleton:
-        raise ValueError("a and b must use the leading singleton together")
-    if gates_are_preactivated is None:
-        gates_are_preactivated = a_has_leading_singleton
+    # ``a`` may carry a leading singleton [1, T, H_k, K] or be [T, H_k, K].
+    # ``b`` may carry a leading singleton [1, T, H_v] or be [T, H_v].
+    # Normalize both to their stripped forms.
     if a.ndim == 4:
         if a.shape[0] != 1:
             raise ValueError("4D a must have a leading singleton dimension")
@@ -69,9 +67,7 @@ def kda_target_verify_npu(
         raise ValueError("a must have shape [tokens, H_k, K]")
     if tuple(b.shape) != (q.shape[1], h_v):
         raise ValueError("b must have shape [tokens, H_v]")
-    if not gates_are_preactivated and (
-        A_log.numel() != h_k or tuple(dt_bias.shape) != (h_k, key_dim)
-    ):
+    if A_log.numel() != h_k or tuple(dt_bias.shape) != (h_k, key_dim):
         raise ValueError("A_log and dt_bias shapes do not match KDA heads")
     if initial_state_source.ndim != 4 or tuple(initial_state_source.shape[1:]) != (
         h_v,
@@ -173,16 +169,10 @@ def kda_target_verify_npu(
     k_bsnd = k.contiguous()
     v_bsnd = v.contiguous()
 
-    # When gates are preactivated, the recurrent_kda kernel with
-    # use_gate_in_kernel=False applies exp(gate) to recover the decay factor.
-    # This matches exp(a) in the previous Triton kernel. Beta is already
-    # sigmoid-activated so use_beta_sigmoid_in_kernel=False.
-    use_gate_in_kernel = not gates_are_preactivated
-    use_beta_sigmoid = not gates_are_preactivated
-
-    a_log_arg = A_log if not gates_are_preactivated else None
-    dt_bias_arg = dt_bias if not gates_are_preactivated else None
-
+    # The recurrent_kda kernel computes the full gate contract internally:
+    #   exp(-exp(A_log) * softplus(a + dt_bias))   (safe_gate=False)
+    #   lower_bound * sigmoid(-exp(A_log) * (a + dt_bias))  (safe_gate=True)
+    # and sigmoid(b), so we always pass the raw gate and beta.
     out = torch.ops.npu.recurrent_kda(
         q_bsnd,
         k_bsnd,
@@ -192,15 +182,15 @@ def kda_target_verify_npu(
         state_pool,
         cu_seqlens,
         ssm_state_indices,
-        a_log=a_log_arg,
-        dt_bias=dt_bias_arg,
+        a_log=A_log,
+        dt_bias=dt_bias,
         scale=scale,
         use_qk_l2norm_in_kernel=True,
-        use_gate_in_kernel=use_gate_in_kernel,
-        use_beta_sigmoid_in_kernel=use_beta_sigmoid,
+        use_gate_in_kernel=True,
+        use_beta_sigmoid_in_kernel=True,
         allow_neg_eigval=False,
-        safe_gate=False,
-        lower_bound=-5.0,
+        safe_gate=safe_gate,
+        lower_bound=lower_bound,
         state_v_first=True,
     )
     return out
