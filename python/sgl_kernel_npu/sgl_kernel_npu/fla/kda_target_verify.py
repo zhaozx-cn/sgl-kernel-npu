@@ -67,8 +67,13 @@ def kda_target_verify_npu(
         raise ValueError("a must have shape [tokens, H_k, K]")
     if tuple(b.shape) != (q.shape[1], h_v):
         raise ValueError("b must have shape [tokens, H_v]")
-    if A_log.numel() != h_k or tuple(dt_bias.shape) != (h_k, key_dim):
-        raise ValueError("A_log and dt_bias shapes do not match KDA heads")
+    if A_log.numel() != h_k:
+        raise ValueError("A_log numel must match H_k")
+    if dt_bias.numel() != h_k * key_dim:
+        raise ValueError("dt_bias numel must match H_k * K")
+    # Flatten A_log to [H_k] and dt_bias to [H_k, K] for the kernel.
+    A_log = A_log.reshape(h_k).contiguous()
+    dt_bias = dt_bias.reshape(h_k, key_dim).contiguous()
     if initial_state_source.ndim != 4 or tuple(initial_state_source.shape[1:]) != (
         h_v,
         value_dim,
