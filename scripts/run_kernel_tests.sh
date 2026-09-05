@@ -71,6 +71,7 @@ SPECULATIVE_TESTS=(
     test_verify_tree.py
     test_apply_token_bitmask.py
     test_argmax_softmax_prob.py
+    test_dspark_top1.py
 )
 
 MAMBA_TESTS=(
@@ -86,6 +87,8 @@ FLA_TESTS=(
     test_chunk_gdn_triton.py
     test_recurrent_gated_delta_rule.py
     test_fused_gdn_gating_without_sigmoid.py
+    test_kda_ragged.py
+    test_kda_target_verify.py
     test_solve_tril.py
     test_triangular_inverse.py
 )

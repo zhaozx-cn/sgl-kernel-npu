@@ -274,6 +274,75 @@ def run_positive_case(
     )
 
 
+def test_causal_conv1d_dense3d_update_matches_flat2d_with_padding():
+    """The dense KDA 3D call must preserve update-mode state semantics."""
+    device = torch.device("npu")
+    batch, steps, dim, width = 3, 8, 256, 4
+    state_len = width - 1 + steps - 1
+    num_cache_lines = 8
+
+    x = torch.randn(batch, steps, dim, dtype=torch.bfloat16, device=device)
+    weight = torch.randn(width, dim, dtype=torch.bfloat16, device=device)
+    bias = torch.randn(dim, dtype=torch.bfloat16, device=device)
+    initial_states = torch.randn(
+        num_cache_lines, state_len, dim, dtype=torch.bfloat16, device=device
+    )
+    states_2d = initial_states.clone()
+    states_3d = initial_states.clone()
+    query_start_loc = torch.arange(
+        0,
+        batch * steps + 1,
+        step=steps,
+        dtype=torch.int32,
+        device=device,
+    )
+    cache_indices = torch.tensor([2, PAD_SLOT_ID, 5], dtype=torch.int32, device=device)
+    cache_indices_i64 = cache_indices.to(torch.int64)
+    num_accepted_tokens = torch.full((batch,), steps, dtype=torch.int32, device=device)
+
+    output_2d = torch.ops.npu.causal_conv1d(
+        x.reshape(batch * steps, dim),
+        weight,
+        states_2d,
+        bias=bias,
+        query_start_loc=query_start_loc,
+        cache_indices=cache_indices,
+        num_accepted_tokens=num_accepted_tokens,
+        activation_mode=1,
+        pad_slot_id=PAD_SLOT_ID,
+        run_mode=1,
+    ).view(batch, steps, dim)
+    output_3d = torch.ops.npu.causal_conv1d(
+        x,
+        weight,
+        states_3d,
+        bias=bias,
+        query_start_loc=None,
+        cache_indices=cache_indices_i64,
+        num_accepted_tokens=num_accepted_tokens,
+        activation_mode=1,
+        pad_slot_id=PAD_SLOT_ID,
+        run_mode=1,
+    )
+    torch.npu.synchronize()
+
+    # The custom op intentionally leaves padding output undefined, so compare
+    # only requests whose cache index is valid. State side effects must match
+    # exactly for every cache line, and the pad request must touch no line.
+    valid_requests = cache_indices.cpu() >= 0
+    torch.testing.assert_close(
+        output_3d.cpu()[valid_requests],
+        output_2d.cpu()[valid_requests],
+        atol=0,
+        rtol=0,
+    )
+    torch.testing.assert_close(states_3d, states_2d, atol=0, rtol=0)
+    untouched = torch.tensor([0, 1, 3, 4, 6, 7], dtype=torch.int64, device=device)
+    torch.testing.assert_close(
+        states_3d[untouched], initial_states[untouched], atol=0, rtol=0
+    )
+
+
 def expect_failure(name: str, fn, expected_substrings: tuple[str, ...]):
     try:
         fn()
@@ -551,6 +620,7 @@ def main():
             pad_slot_id=args.pad_slot_id,
         )
 
+    test_causal_conv1d_dense3d_update_matches_flat2d_with_padding()
     run_negative_cases(
         device=device, dtype=torch.bfloat16, pad_slot_id=args.pad_slot_id
     )
