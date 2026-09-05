@@ -134,6 +134,14 @@ TORCH_LIBRARY_FRAGMENT(npu, m)
         "Tensor? num_accepted_tokens=None, Tensor? g=None, Tensor? gk=None) -> Tensor");
 
     m.def(
+        "recurrent_kda(Tensor query, Tensor key, Tensor value, Tensor gate, Tensor beta, "
+        "Tensor(a!) initial_state, Tensor cu_seqlens, Tensor ssm_state_indices, Tensor A_log, Tensor dt_bias, *, "
+        "Tensor? num_accepted_tokens=None, float scale=0.08838834764831845, "
+        "bool use_qk_l2norm_in_kernel=True, bool use_gate_in_kernel=True, "
+        "bool use_beta_sigmoid_in_kernel=False, bool allow_neg_eigval=False, "
+        "bool safe_gate=True, float lower_bound=-5.0) -> Tensor");
+
+    m.def(
         "mega_chunk_gdn(Tensor q, Tensor k, Tensor v, Tensor g, Tensor beta, "
         "Tensor mask_lower, Tensor mask_full, Tensor minus_identity, Tensor cu_seqlens, "
         "Tensor(a!) out, Tensor(b!) g_sum, Tensor(c!) g_t, Tensor(d!) beta_t, "
@@ -326,6 +334,8 @@ TORCH_LIBRARY_IMPL(npu, PrivateUse1, m)
     m.impl("batch_matmul_transpose", TORCH_FN(sglang::npu_kernel::batch_matmul_transpose));
 
     m.impl("recurrent_gated_delta_rule", TORCH_FN(sglang::npu_kernel::recurrent_gated_delta_rule));
+
+    m.impl("recurrent_kda", TORCH_FN(sglang::npu_kernel::recurrent_kda_impl));
 
     m.impl("mega_chunk_gdn", TORCH_FN(sglang::npu_kernel::mega_chunk_gdn));
 
