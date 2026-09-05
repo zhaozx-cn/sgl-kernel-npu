@@ -101,6 +101,15 @@ void sgemmc_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_indices,
 at::Tensor apply_token_bitmask(at::Tensor logits, at::Tensor bitmask,
                                c10::optional<at::Tensor> indices);
 
+at::Tensor recurrent_kda_impl(
+    const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
+    const at::Tensor &gate, const at::Tensor &beta, at::Tensor &initial_state,
+    const at::Tensor &cu_seqlens, const at::Tensor &ssm_state_indices,
+    const at::Tensor &a_log, const at::Tensor &dt_bias,
+    const c10::optional<at::Tensor> &num_accepted_tokens, double scale,
+    bool use_qk_l2norm_in_kernel, bool use_gate_in_kernel, bool use_beta_sigmoid_in_kernel,
+    bool allow_neg_eigval, bool safe_gate, double lower_bound);
+
 #ifdef SGL_KERNEL_ENABLE_A3_ONLY_OPS
 std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
 mla_preprocess(const at::Tensor &hiddenState, const at::Tensor &gamma0,
@@ -133,15 +142,6 @@ at::Tensor recurrent_gated_delta_rule(
     c10::optional<at::Tensor> cache_indices_opt,
     c10::optional<at::Tensor> num_accepted_tokens_opt,
     c10::optional<at::Tensor> g_opt, c10::optional<at::Tensor> gk_opt);
-
-at::Tensor recurrent_kda_impl(
-    const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
-    const at::Tensor &gate, const at::Tensor &beta, at::Tensor &initial_state,
-    const at::Tensor &cu_seqlens, const at::Tensor &ssm_state_indices,
-    const at::Tensor &a_log, const at::Tensor &dt_bias,
-    const c10::optional<at::Tensor> &num_accepted_tokens, double scale,
-    bool use_qk_l2norm_in_kernel, bool use_gate_in_kernel, bool use_beta_sigmoid_in_kernel,
-    bool allow_neg_eigval, bool safe_gate, double lower_bound);
 
 void mega_chunk_gdn(
     const at::Tensor &q, const at::Tensor &k, const at::Tensor &v,
