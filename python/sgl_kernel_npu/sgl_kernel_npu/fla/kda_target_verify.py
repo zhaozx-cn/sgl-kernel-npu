@@ -2,10 +2,7 @@ from typing import Optional
 
 import torch
 
-from sgl_kernel_npu.fla.utils import input_guard
 
-
-@input_guard
 def kda_target_verify_npu(
     *,
     A_log: torch.Tensor,
@@ -67,13 +64,22 @@ def kda_target_verify_npu(
         raise ValueError("a must have shape [tokens, H_k, K]")
     if tuple(b.shape) != (q.shape[1], h_v):
         raise ValueError("b must have shape [tokens, H_v]")
+
+    # The kernel indexes A_log[head] and dt_bias[head * K] by the HV head
+    # (0..h_v-1), not the H_k head.  The model stores one A_log / dt_bias
+    # entry per H_k head, so when h_v != h_k we must expand them with
+    # repeat_interleave to match the gate expansion.
+    repeat_factor = h_v // h_k
     if A_log.numel() != h_k:
         raise ValueError("A_log numel must match H_k")
     if dt_bias.numel() != h_k * key_dim:
         raise ValueError("dt_bias numel must match H_k * K")
-    # Flatten A_log to [H_k] and dt_bias to [H_k, K] for the kernel.
     A_log = A_log.reshape(h_k).contiguous()
     dt_bias = dt_bias.reshape(h_k, key_dim).contiguous()
+    if h_v != h_k:
+        A_log = A_log.repeat_interleave(repeat_factor).contiguous()
+        dt_bias = dt_bias.repeat_interleave(repeat_factor, dim=0).contiguous()
+
     if initial_state_source.ndim != 4 or tuple(initial_state_source.shape[1:]) != (
         h_v,
         value_dim,
@@ -99,8 +105,6 @@ def kda_target_verify_npu(
     ]
     if any(t.device != q.device for t in tensors):
         raise ValueError("all tensors must be on the same device")
-    initial_state_indices = initial_state_indices.contiguous()
-    intermediate_state_indices = intermediate_state_indices.contiguous()
     if initial_state_source.dtype != intermediate_states_buffer.dtype:
         raise ValueError("persistent and intermediate state dtypes must match")
     if initial_state_source.dtype != torch.bfloat16:
@@ -115,11 +119,22 @@ def kda_target_verify_npu(
     if scale <= 0:
         raise ValueError("scale must be positive")
 
+    # Make read-only tensors contiguous.  intermediate_states_buffer is NOT
+    # made contiguous here because the kernel writes state snapshots back
+    # through it in-place — a .contiguous() copy would silently discard
+    # those writes.
+    q_c = q.contiguous()
+    k_c = k.contiguous()
+    v_c = v.contiguous()
+    a_c = a.contiguous()
+    b_c = b.contiguous()
+    initial_state_indices = initial_state_indices.contiguous()
+    intermediate_state_indices = intermediate_state_indices.contiguous()
+
     # Reshape intermediate buffer from [scratch, steps, H_v, V, K] to
     # [scratch*steps, H_v, V, K] so the kernel treats each (batch, step) pair
-    # as an independent state slot. The buffer must be contiguous so that
-    # in-place state writes are visible to the caller through the original
-    # intermediate_states_buffer reference.
+    # as an independent state slot.  The buffer must already be contiguous
+    # so that in-place state writes are visible to the caller.
     if not intermediate_states_buffer.is_contiguous():
         raise ValueError("intermediate_states_buffer must be contiguous")
     state_pool = intermediate_states_buffer.view(
@@ -158,30 +173,26 @@ def kda_target_verify_npu(
     step_offsets = torch.arange(
         cache_steps, dtype=torch.int32, device=q.device
     ).unsqueeze(0)
-    ssm_state_indices = base_slots * cache_steps + step_offsets
+    ssm_state_indices = (base_slots * cache_steps + step_offsets).contiguous()
 
     # Expand gate from H_k to H_v heads (each H_k head serves H_v/H_k value heads).
     if h_v != h_k:
-        repeat_factor = h_v // h_k
-        gate_expanded = a.repeat_interleave(repeat_factor, dim=1)
+        gate_expanded = a_c.repeat_interleave(repeat_factor, dim=1)
     else:
-        gate_expanded = a
+        gate_expanded = a_c
 
     # Reshape to BSND [1, tokens, H_v, K] for the kernel.
     gate_bsnd = gate_expanded.unsqueeze(0).contiguous()
-    beta_bsnd = b.unsqueeze(0).contiguous()
-    q_bsnd = q.contiguous()
-    k_bsnd = k.contiguous()
-    v_bsnd = v.contiguous()
+    beta_bsnd = b_c.unsqueeze(0).contiguous()
 
     # The recurrent_kda kernel computes the full gate contract internally:
     #   exp(-exp(A_log) * softplus(a + dt_bias))   (safe_gate=False)
     #   lower_bound * sigmoid(-exp(A_log) * (a + dt_bias))  (safe_gate=True)
     # and sigmoid(b), so we always pass the raw gate and beta.
     out = torch.ops.npu.recurrent_kda(
-        q_bsnd,
-        k_bsnd,
-        v_bsnd,
+        q_c,
+        k_c,
+        v_c,
         gate_bsnd,
         beta_bsnd,
         state_pool,
