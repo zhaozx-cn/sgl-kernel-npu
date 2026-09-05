@@ -1,177 +1,11 @@
 from typing import Optional
 
 import torch
-import triton
-import triton.language as tl
+
+from sgl_kernel_npu.fla.utils import input_guard
 
 
-@triton.jit
-def _kda_target_verify_kernel(
-    A_log_ptr,
-    dt_bias_ptr,
-    q_ptr,
-    k_ptr,
-    v_ptr,
-    a_ptr,
-    b_ptr,
-    initial_state_ptr,
-    initial_indices_ptr,
-    snapshot_ptr,
-    snapshot_indices_ptr,
-    out_ptr,
-    scale,
-    stride_q_token: tl.constexpr,
-    stride_q_head: tl.constexpr,
-    stride_q_dim: tl.constexpr,
-    stride_k_token: tl.constexpr,
-    stride_k_head: tl.constexpr,
-    stride_k_dim: tl.constexpr,
-    stride_v_token: tl.constexpr,
-    stride_v_head: tl.constexpr,
-    stride_v_dim: tl.constexpr,
-    stride_a_token: tl.constexpr,
-    stride_a_head: tl.constexpr,
-    stride_a_dim: tl.constexpr,
-    stride_b_token: tl.constexpr,
-    stride_b_head: tl.constexpr,
-    initial_stride_0,
-    initial_stride_1,
-    initial_stride_2,
-    initial_stride_3,
-    snapshot_stride_0,
-    snapshot_stride_1,
-    snapshot_stride_2,
-    snapshot_stride_3,
-    snapshot_stride_4,
-    H_Q: tl.constexpr,
-    H_K: tl.constexpr,
-    H_V: tl.constexpr,
-    K: tl.constexpr,
-    V: tl.constexpr,
-    STEPS: tl.constexpr,
-    BK: tl.constexpr,
-    BV: tl.constexpr,
-    GATES_ARE_PREACTIVATED: tl.constexpr,
-):
-    pid_batch = tl.program_id(0)
-    pid_hv = tl.program_id(1)
-    pid_v = tl.program_id(2)
-
-    offset_k = tl.arange(0, BK)
-    offset_v = pid_v * BV + tl.arange(0, BV)
-    mask_k = offset_k < K
-    mask_v = offset_v < V
-    mask_state = mask_v[:, None] & mask_k[None, :]
-
-    q_ratio = H_V // H_Q
-    k_ratio = H_V // H_K
-    q_head = pid_hv // q_ratio
-    k_head = pid_hv // k_ratio
-    initial_idx = tl.load(initial_indices_ptr + pid_batch).to(tl.int64)
-    snapshot_idx = tl.load(snapshot_indices_ptr + pid_batch).to(tl.int64)
-
-    initial_offsets = (
-        initial_idx * initial_stride_0
-        + pid_hv * initial_stride_1
-        + offset_v[:, None] * initial_stride_2
-        + offset_k[None, :] * initial_stride_3
-    )
-    state = tl.load(
-        initial_state_ptr + initial_offsets,
-        mask=(initial_idx >= 0) & mask_state,
-        other=0.0,
-    ).to(tl.float32)
-
-    A_log = tl.zeros((), dtype=tl.float32)
-    dt_bias = tl.zeros((BK,), dtype=tl.float32)
-    if not GATES_ARE_PREACTIVATED:
-        A_log = tl.load(A_log_ptr + k_head).to(tl.float32)
-        dt_bias = tl.load(
-            dt_bias_ptr + k_head * K + offset_k,
-            mask=mask_k,
-            other=0.0,
-        ).to(tl.float32)
-
-    for step in tl.static_range(0, STEPS):
-        token = pid_batch * STEPS + step
-        q = tl.load(
-            q_ptr
-            + token * stride_q_token
-            + q_head * stride_q_head
-            + offset_k * stride_q_dim,
-            mask=mask_k,
-            other=0.0,
-        ).to(tl.float32)
-        k = tl.load(
-            k_ptr
-            + token * stride_k_token
-            + k_head * stride_k_head
-            + offset_k * stride_k_dim,
-            mask=mask_k,
-            other=0.0,
-        ).to(tl.float32)
-        value = tl.load(
-            v_ptr
-            + token * stride_v_token
-            + pid_hv * stride_v_head
-            + offset_v * stride_v_dim,
-            mask=mask_v,
-            other=0.0,
-        ).to(tl.float32)
-        a = tl.load(
-            a_ptr
-            + token * stride_a_token
-            + k_head * stride_a_head
-            + offset_k * stride_a_dim,
-            mask=mask_k,
-            other=0.0,
-        ).to(tl.float32)
-        beta_input = tl.load(
-            b_ptr + token * stride_b_token + pid_hv * stride_b_head
-        ).to(tl.float32)
-
-        q = q / (tl.sqrt(tl.sum(q * q, axis=0)) + 1e-6)
-        k = k / (tl.sqrt(tl.sum(k * k, axis=0)) + 1e-6)
-        q *= scale
-
-        if GATES_ARE_PREACTIVATED:
-            gate = tl.exp(a)
-            beta = beta_input
-        else:
-            gate_input = a + dt_bias
-            softplus = tl.where(
-                gate_input <= 20.0,
-                tl.log(1.0 + tl.exp(gate_input)),
-                gate_input,
-            )
-            gate = tl.exp(-tl.exp(A_log) * softplus)
-            beta = 1.0 / (1.0 + tl.exp(-beta_input))
-
-        state *= gate[None, :]
-        value -= tl.sum(state * k[None, :], axis=1)
-        value *= beta
-        state += value[:, None] * k[None, :]
-        output = tl.sum(state * q[None, :], axis=1)
-
-        tl.store(
-            out_ptr + (token * H_V + pid_hv) * V + offset_v,
-            output,
-            mask=mask_v,
-        )
-        snapshot_offsets = (
-            snapshot_idx * snapshot_stride_0
-            + step * snapshot_stride_1
-            + pid_hv * snapshot_stride_2
-            + offset_v[:, None] * snapshot_stride_3
-            + offset_k[None, :] * snapshot_stride_4
-        )
-        tl.store(
-            snapshot_ptr + snapshot_offsets,
-            state,
-            mask=(snapshot_idx >= 0) & mask_state,
-        )
-
-
+@input_guard
 def kda_target_verify_npu(
     *,
     A_log: torch.Tensor,
@@ -189,15 +23,16 @@ def kda_target_verify_npu(
     scale: Optional[float] = None,
     gates_are_preactivated: Optional[bool] = None,
 ) -> torch.Tensor:
-    """KDA fixed-width target verification with per-step state snapshots.
+    """KDA fixed-width target verification backed by the AscendC recurrent_kda kernel.
 
-    The persistent and intermediate state layout is the Ascend KDA layout
-    ``[..., H_v, V, K]``. The persistent cache is read-only.
+    Replaces the previous Triton implementation with the fused C++ operator
+    from sgl-kernel-npu. The persistent and intermediate state layout is the
+    Ascend KDA layout ``[..., H_v, V, K]``.
 
     When ``gates_are_preactivated`` is true, ``a`` is the log-decay
     ``-exp(A_log) * softplus(raw_a + dt_bias)`` and ``b`` is already sigmoid
-    activated. Both gate tensors may include the SGLang leading singleton.
-    When the flag is omitted, a paired leading singleton selects this mode.
+    activated. The recurrent_kda kernel with ``use_gate_in_kernel=False``
+    applies ``exp(a)`` to recover the decay factor.
     """
     if q.ndim != 4 or k.ndim != 4 or v.ndim != 4:
         raise ValueError("q, k, and v must have shape [1, tokens, heads, dim]")
@@ -256,29 +91,19 @@ def kda_target_verify_npu(
     ):
         raise ValueError("intermediate_state_indices must contain at least B entries")
 
-    # SGLang produces q/k/v as views of a packed QKV tensor. The kernel consumes
-    # explicit strides so serving can avoid five per-layer materializations.
     tensors = [
-        A_log,
-        dt_bias,
-        q,
-        k,
-        v,
-        a,
-        b,
-        initial_state_source,
-        initial_state_indices,
-        intermediate_states_buffer,
-        intermediate_state_indices,
+        A_log, dt_bias, q, k, v, a, b,
+        initial_state_source, initial_state_indices,
+        intermediate_states_buffer, intermediate_state_indices,
     ]
     if any(t.device != q.device for t in tensors):
         raise ValueError("all tensors must be on the same device")
-    A_log = A_log.contiguous()
-    dt_bias = dt_bias.contiguous()
     initial_state_indices = initial_state_indices.contiguous()
     intermediate_state_indices = intermediate_state_indices.contiguous()
     if initial_state_source.dtype != intermediate_states_buffer.dtype:
         raise ValueError("persistent and intermediate state dtypes must match")
+    if initial_state_source.dtype != torch.bfloat16:
+        raise ValueError("recurrent_kda kernel currently requires bfloat16 state")
     if initial_state_indices.dtype not in (torch.int32, torch.int64):
         raise ValueError("initial_state_indices must be int32 or int64")
     if intermediate_state_indices.dtype not in (torch.int32, torch.int64):
@@ -289,60 +114,93 @@ def kda_target_verify_npu(
     if scale <= 0:
         raise ValueError("scale must be positive")
 
-    out = torch.empty((1, q.shape[1], h_v, value_dim), dtype=v.dtype, device=v.device)
-    bk = triton.next_power_of_2(key_dim)
-    if bk > 256:
-        raise ValueError("key dimensions greater than 256 are unsupported")
-    bv = min(64, triton.next_power_of_2(value_dim))
-    grid = (batch, h_v, triton.cdiv(value_dim, bv))
-    _kda_target_verify_kernel[grid](
-        A_log,
-        dt_bias,
-        q,
-        k,
-        v,
-        a,
-        b,
-        initial_state_source,
-        initial_state_indices,
-        intermediate_states_buffer,
-        intermediate_state_indices,
-        out,
-        scale,
-        q.stride(1),
-        q.stride(2),
-        q.stride(3),
-        k.stride(1),
-        k.stride(2),
-        k.stride(3),
-        v.stride(1),
-        v.stride(2),
-        v.stride(3),
-        a.stride(0),
-        a.stride(1),
-        a.stride(2),
-        b.stride(0),
-        b.stride(1),
-        initial_state_source.stride(0),
-        initial_state_source.stride(1),
-        initial_state_source.stride(2),
-        initial_state_source.stride(3),
-        intermediate_states_buffer.stride(0),
-        intermediate_states_buffer.stride(1),
-        intermediate_states_buffer.stride(2),
-        intermediate_states_buffer.stride(3),
-        intermediate_states_buffer.stride(4),
-        H_Q=h_q,
-        H_K=h_k,
-        H_V=h_v,
-        K=key_dim,
-        V=value_dim,
-        STEPS=cache_steps,
-        BK=bk,
-        BV=bv,
-        GATES_ARE_PREACTIVATED=gates_are_preactivated,
-        num_warps=1,
-        num_stages=3,
-        multibuffer=False,
+    # Reshape intermediate buffer from [scratch, steps, H_v, V, K] to
+    # [scratch*steps, H_v, V, K] so the kernel treats each (batch, step) pair
+    # as an independent state slot. The buffer must be contiguous so that
+    # in-place state writes are visible to the caller through the original
+    # intermediate_states_buffer reference.
+    if not intermediate_states_buffer.is_contiguous():
+        raise ValueError("intermediate_states_buffer must be contiguous")
+    state_pool = intermediate_states_buffer.view(
+        -1, h_v, value_dim, key_dim
+    )
+
+    # Pre-copy initial states from the persistent pool into the intermediate
+    # buffer at slot 0 of each batch's section. The recurrent_kda kernel reads
+    # the initial state from ssm_state_indices[batch, 0] and writes per-step
+    # states to ssm_state_indices[batch, step].
+    init_indices_flat = (
+        intermediate_state_indices[:batch].to(torch.int64) * cache_steps
+    )
+    src_states = initial_state_source[
+        initial_state_indices[:batch].to(torch.int64)
+    ]
+    state_pool.index_copy_(0, init_indices_flat, src_states)
+
+    # Build cu_seqlens: [0, steps, 2*steps, ..., batch*steps]
+    cu_seqlens = torch.arange(
+        0,
+        batch * cache_steps + 1,
+        step=cache_steps,
+        dtype=torch.int32,
+        device=q.device,
+    )
+
+    # Build 2D ssm_state_indices [batch, steps] where element [i, j] maps to
+    # the flattened intermediate buffer slot for batch i, step j.
+    base_slots = (
+        intermediate_state_indices[:batch]
+        .to(torch.int32)
+        .unsqueeze(1)
+        .expand(batch, cache_steps)
+    )
+    step_offsets = torch.arange(
+        cache_steps, dtype=torch.int32, device=q.device
+    ).unsqueeze(0)
+    ssm_state_indices = base_slots * cache_steps + step_offsets
+
+    # Expand gate from H_k to H_v heads (each H_k head serves H_v/H_k value heads).
+    if h_v != h_k:
+        repeat_factor = h_v // h_k
+        gate_expanded = a.repeat_interleave(repeat_factor, dim=1)
+    else:
+        gate_expanded = a
+
+    # Reshape to BSND [1, tokens, H_v, K] for the kernel.
+    gate_bsnd = gate_expanded.unsqueeze(0).contiguous()
+    beta_bsnd = b.unsqueeze(0).contiguous()
+    q_bsnd = q.contiguous()
+    k_bsnd = k.contiguous()
+    v_bsnd = v.contiguous()
+
+    # When gates are preactivated, the recurrent_kda kernel with
+    # use_gate_in_kernel=False applies exp(gate) to recover the decay factor.
+    # This matches exp(a) in the previous Triton kernel. Beta is already
+    # sigmoid-activated so use_beta_sigmoid_in_kernel=False.
+    use_gate_in_kernel = not gates_are_preactivated
+    use_beta_sigmoid = not gates_are_preactivated
+
+    a_log_arg = A_log if not gates_are_preactivated else None
+    dt_bias_arg = dt_bias if not gates_are_preactivated else None
+
+    out = torch.ops.npu.recurrent_kda(
+        q_bsnd,
+        k_bsnd,
+        v_bsnd,
+        gate_bsnd,
+        beta_bsnd,
+        state_pool,
+        cu_seqlens,
+        ssm_state_indices,
+        a_log=a_log_arg,
+        dt_bias=dt_bias_arg,
+        scale=scale,
+        use_qk_l2norm_in_kernel=True,
+        use_gate_in_kernel=use_gate_in_kernel,
+        use_beta_sigmoid_in_kernel=use_beta_sigmoid,
+        allow_neg_eigval=False,
+        safe_gate=False,
+        lower_bound=-5.0,
+        state_v_first=True,
     )
     return out
