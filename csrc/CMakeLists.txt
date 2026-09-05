@@ -57,6 +57,7 @@ set(OP_SRCS
     ${PROJECT_OP_SRC_BASE}/sparse_attn_sharedkv_metadata/op_host/sparse_attn_sharedkv_metadata.cpp
     ${PROJECT_OP_SRC_BASE}/sparse_attention_score/op_host/sparse_attention_score.cpp
     ${PROJECT_OP_SRC_BASE}/sparse_attention_score/op_host/tiling/sparse_attention_score_tiling.cpp
+    ${PROJECT_OP_SRC_BASE}/recurrent_kda/op_host/recurrent_kda.cpp
     )
 # A3-only host sources
 if(SGL_KERNEL_ENABLE_A3_ONLY_OPS)
@@ -70,7 +71,6 @@ if(SGL_KERNEL_ENABLE_A3_ONLY_OPS)
         ${PROJECT_OP_SRC_BASE}/sparse_attn_sharedkv/op_host/sparse_attn_sharedkv_tiling.cpp
         ${PROJECT_OP_SRC_BASE}/tri_inv/op_host/tri_inv.cpp
         ${PROJECT_OP_SRC_BASE}/recurrent_gated_delta_rule/op_host/recurrent_gated_delta_rule.cpp
-        ${PROJECT_OP_SRC_BASE}/recurrent_kda/op_host/recurrent_kda.cpp
         ${PROJECT_OP_SRC_BASE}/mega_chunk_gdn/op_host/mega_chunk_gdn.cpp
         ${PROJECT_OP_SRC_BASE}/sparsity_driven_kv_offload/unidex_copy/op_host/unidex_copy.cpp
         ${PROJECT_OP_SRC_BASE}/sparsity_driven_kv_offload/slot_map_lookup/op_host/slot_map_lookup.cpp
@@ -161,13 +161,13 @@ set(WORKSPACE_KERNEL_SRCS
     ${PROJECT_OP_SRC_BASE}/lora/op_kernel/sgemmc_expand_kernel.cpp
     ${PROJECT_OP_SRC_BASE}/lora/op_kernel/sgemmc_shrink_kernel.cpp
     ${PROJECT_OP_SRC_BASE}/sparse_attention_score/op_kernel/sparse_attention_score.cpp
+    ${PROJECT_OP_SRC_BASE}/recurrent_kda/op_kernel/recurrent_kda.cpp
 )
 # A3-only workspace kernels (causal_conv1d kernel is intentionally always-built)
 if(SGL_KERNEL_ENABLE_A3_ONLY_OPS)
     list(APPEND WORKSPACE_KERNEL_SRCS
         ${PROJECT_OP_SRC_BASE}/mla_preprocess/op_kernel/mla_preprocess_kernel.cpp
         ${PROJECT_OP_SRC_BASE}/lightning_indexer/op_kernel/lightning_indexer_kernel.cpp
-        ${PROJECT_OP_SRC_BASE}/recurrent_kda/op_kernel/recurrent_kda.cpp
     )
 endif()
 # A5-only workspace kernels

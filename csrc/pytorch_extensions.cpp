@@ -110,6 +110,14 @@ TORCH_LIBRARY_FRAGMENT(npu, m)
         "Tensor? num_accepted_tokens=None, int activation_mode=0, int pad_slot_id=-1, "
         "int run_mode=0) -> Tensor");
 
+    m.def(
+        "recurrent_kda(Tensor query, Tensor key, Tensor value, Tensor gate, Tensor beta, "
+        "Tensor(a!) initial_state, Tensor cu_seqlens, Tensor ssm_state_indices, "
+        "Tensor? a_log=None, Tensor? dt_bias=None, Tensor? num_accepted_tokens=None, "
+        "float scale=1.0, bool use_qk_l2norm_in_kernel=False, bool use_gate_in_kernel=False, "
+        "bool use_beta_sigmoid_in_kernel=False, bool allow_neg_eigval=False, "
+        "bool safe_gate=False, float lower_bound=-5.0, bool state_v_first=False) -> Tensor");
+
 #ifdef SGL_KERNEL_ENABLE_A3_ONLY_OPS
     m.def(
         "mla_preprocess(Tensor hiddenState, Tensor gamma0, Tensor beta0, Tensor wdqkv, "
@@ -133,14 +141,6 @@ TORCH_LIBRARY_FRAGMENT(npu, m)
         "int nk, int nv, "
         "Tensor(b!)? intermediate_state=None, Tensor? cache_indices=None, "
         "Tensor? num_accepted_tokens=None, Tensor? g=None, Tensor? gk=None) -> Tensor");
-
-    m.def(
-        "recurrent_kda(Tensor query, Tensor key, Tensor value, Tensor gate, Tensor beta, "
-        "Tensor(a!) initial_state, Tensor cu_seqlens, Tensor ssm_state_indices, "
-        "Tensor? a_log=None, Tensor? dt_bias=None, Tensor? num_accepted_tokens=None, "
-        "float scale=1.0, bool use_qk_l2norm_in_kernel=False, bool use_gate_in_kernel=False, "
-        "bool use_beta_sigmoid_in_kernel=False, bool allow_neg_eigval=False, "
-        "bool safe_gate=False, float lower_bound=-5.0, bool state_v_first=False) -> Tensor");
 
     m.def(
         "mega_chunk_gdn(Tensor q, Tensor k, Tensor v, Tensor g, Tensor beta, "
@@ -329,14 +329,14 @@ TORCH_LIBRARY_IMPL(npu, PrivateUse1, m)
             has_initial_state_or_empty, num_accepted_tokens_or_empty, activation_mode, pad_slot_id, run_mode);
     });
 
+    m.impl("recurrent_kda", TORCH_FN(sglang::npu_kernel::recurrent_kda_impl));
+
 #ifdef SGL_KERNEL_ENABLE_A3_ONLY_OPS
     m.impl("mla_preprocess", TORCH_FN(sglang::npu_kernel::mla_preprocess));
 
     m.impl("batch_matmul_transpose", TORCH_FN(sglang::npu_kernel::batch_matmul_transpose));
 
     m.impl("recurrent_gated_delta_rule", TORCH_FN(sglang::npu_kernel::recurrent_gated_delta_rule));
-
-    m.impl("recurrent_kda", TORCH_FN(sglang::npu_kernel::recurrent_kda_impl));
 
     m.impl("mega_chunk_gdn", TORCH_FN(sglang::npu_kernel::mega_chunk_gdn));
 
