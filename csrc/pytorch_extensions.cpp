@@ -102,12 +102,6 @@ TORCH_LIBRARY_FRAGMENT(npu, m)
         "causal_conv1d_update(Tensor x, Tensor weight, Tensor(a!) conv_state, "
         "Tensor conv_state_indices, Tensor? bias=None, Tensor? num_accepted_tokens=None, "
         "Tensor? query_start_loc=None, bool activation_mode=False, int pad_slot_id=-1) -> Tensor");
-    
-    m.def(
-        "causal_conv1d(Tensor x, Tensor weight, Tensor(a!) conv_states, Tensor? bias=None, "
-        "Tensor? query_start_loc=None, Tensor? cache_indices=None, Tensor? has_initial_state=None, "
-        "Tensor? num_accepted_tokens=None, int activation_mode=0, int pad_slot_id=-1, "
-        "int run_mode=0) -> Tensor");
 
     m.def(
         "causal_conv1d(Tensor x, Tensor weight, Tensor(a!) conv_states, Tensor? bias=None, "
