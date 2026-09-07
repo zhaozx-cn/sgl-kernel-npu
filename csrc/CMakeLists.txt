@@ -58,6 +58,7 @@ set(OP_SRCS
     ${PROJECT_OP_SRC_BASE}/sparse_attn_sharedkv_metadata/op_host/sparse_attn_sharedkv_metadata.cpp
     ${PROJECT_OP_SRC_BASE}/sparse_attention_score/op_host/sparse_attention_score.cpp
     ${PROJECT_OP_SRC_BASE}/sparse_attention_score/op_host/tiling/sparse_attention_score_tiling.cpp
+    ${PROJECT_OP_SRC_BASE}/chunk_kda_fwd/op_host/chunk_kda_fwd.cpp
     )
 # A3-only host sources
 if(SGL_KERNEL_ENABLE_A3_ONLY_OPS)
@@ -193,6 +194,32 @@ ascendc_compile_definitions(workspace_kernel PRIVATE
     -DHAVE_TILING
 )
 
+# chunk_kda_fwd: dedicated kernel target with its own compile options. The kernel
+# manages cross-pipe synchronization manually (SetFlag/WaitFlag/SyncAll), so the
+# aclnn build compiles it with --cce-auto-sync=off; keep that here instead of
+# applying it to the shared workspace_kernel target.
+ascendc_library(chunk_kda_fwd_kernel STATIC
+    ${PROJECT_OP_SRC_BASE}/chunk_kda_fwd/op_kernel/chunk_kda_fwd.cpp
+)
+ascendc_include_directories(chunk_kda_fwd_kernel PRIVATE
+    ${PROJECT_OP_SRC_BASE}/chunk_kda_fwd/op_kernel
+    ${PROJECT_OP_SRC_BASE}/utils/kernel
+    ${ASCEND_INCLUDE_DIR}
+)
+ascendc_compile_definitions(chunk_kda_fwd_kernel PRIVATE
+    -DHAVE_WORKSPACE
+    -DHAVE_TILING
+)
+ascendc_compile_options(chunk_kda_fwd_kernel PRIVATE
+    --cce-auto-sync=off
+    -Wno-deprecated-declarations
+)
+if(_sgl_soc_lower MATCHES "^ascend950")
+    ascendc_compile_definitions(chunk_kda_fwd_kernel PRIVATE
+        -DENABLE_CV_COMM_VIA_SSBUF=true
+    )
+endif()
+
 # Build catlass kernel in its own target (no sparse_attention_score include dir),
 # so catlass's #include "tla/layout.hpp" resolves to its own copy and avoids
 # symbol redefinition (RoundDown/CeilDiv/Max/Min/...) with sparse_attention_score.
@@ -262,6 +289,7 @@ target_link_libraries(${OP_PLUGIN_NAME} PRIVATE
         ${A3_ONLY_KERNEL_TARGETS}
         workspace_kernel
         no_workspace_kernel
+        chunk_kda_fwd_kernel
         ${CATLASS_WORKSPACE_KERNEL_TARGETS}
         torch_npu
         ascendcl
@@ -293,6 +321,8 @@ target_include_directories(${OP_PLUGIN_NAME} PRIVATE
         ${PROJECT_OP_SRC_BASE}/sparse_attn_sharedkv/op_host
         ${PROJECT_OP_SRC_BASE}/sparse_attention_score/op_host
         ${PROJECT_OP_SRC_BASE}/sparse_attention_score/op_host/tiling
+        ${PROJECT_OP_SRC_BASE}/chunk_kda_fwd/op_host
+        ${PROJECT_OP_SRC_BASE}/chunk_kda_fwd/op_kernel
         ${TORCH_DIR}/include
         ${TORCH_DIR}/include/torch/csrc/api/include
         ${TORCH_NPU_DIR}/include
