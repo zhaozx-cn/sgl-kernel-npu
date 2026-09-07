@@ -102,6 +102,12 @@ TORCH_LIBRARY_FRAGMENT(npu, m)
         "causal_conv1d_update(Tensor x, Tensor weight, Tensor(a!) conv_state, "
         "Tensor conv_state_indices, Tensor? bias=None, Tensor? num_accepted_tokens=None, "
         "Tensor? query_start_loc=None, bool activation_mode=False, int pad_slot_id=-1) -> Tensor");
+    
+    m.def(
+        "causal_conv1d(Tensor x, Tensor weight, Tensor(a!) conv_states, Tensor? bias=None, "
+        "Tensor? query_start_loc=None, Tensor? cache_indices=None, Tensor? has_initial_state=None, "
+        "Tensor? num_accepted_tokens=None, int activation_mode=0, int pad_slot_id=-1, "
+        "int run_mode=0) -> Tensor");
 
     m.def(
         "causal_conv1d(Tensor x, Tensor weight, Tensor(a!) conv_states, Tensor? bias=None, "
@@ -170,15 +176,22 @@ TORCH_LIBRARY_FRAGMENT(npu, m)
         "str layout_q='BSND', str layout_kv='PA_ND', "
         "bool return_softmax_lse=False) -> (Tensor, Tensor)");
 
-    m.def(
-        "compressor(Tensor x, Tensor wkv, Tensor wgate, Tensor! state_cache, "
-        "Tensor ape, Tensor norm_weight, Tensor rope_sin, Tensor rope_cos, "
-        "Tensor? state_block_table=None, Tensor? cu_seqlens=None, Tensor? seqused=None, "
-        "Tensor? start_pos=None, int rope_head_dim=64, int cmp_ratio=4, int coff=1, "
-        "float norm_eps=1e-6, int rotary_mode=1, int cache_mode=1, "
-        "int state_cache_stride_dim0=0) -> Tensor");
-
     m.def("triangular_inverse(Tensor x) -> Tensor");
+
+    m.def(
+        "unidex_copy(Tensor src, Tensor(a!) dst, Tensor src_index, "
+        "Tensor dst_index, Tensor valid_mask, int src_rows, int dst_rows, "
+        "int block_bytes, int max_copy, int block_dim=8, "
+        "int? src_ptr=None, int? dst_ptr=None) -> ()");
+
+    m.def(
+        "slot_map_lookup(Tensor slot_map, Tensor req_indices, Tensor topk_indices, "
+        "Tensor(a!) token_on_device, Tensor(b!) device_token_pos, "
+        "int block_dim=0) -> ()");
+
+    m.def("shm_allocator_create_and_register(int size, int device_id, str name) -> (int, int)");
+
+    m.def("shm_allocator_free_all(int device_id) -> ()");
 
     m.def(
         "sparse_attn_sharedkv_metadata_host("
@@ -201,6 +214,14 @@ TORCH_LIBRARY_FRAGMENT(npu, m)
         "bool output_w=False, bool output_u=False, bool output_qg=False, "
         "bool output_kg=False, bool output_v_new=False, bool output_h=False) "
         "-> (Tensor, Tensor?, Tensor?, Tensor, Tensor, Tensor?, Tensor?, Tensor?, Tensor?, Tensor?, Tensor?)");
+#ifdef SGL_KERNEL_ENABLE_A5_ONLY_OPS
+    m.def(
+        "kv_compress_epilog(Tensor(a!) kv_compress_cache, Tensor x, Tensor slot_mapping, "
+        "int quant_group_size, int quant_mode, bool round_scale_flag, int layout) -> ()");
+    m.def(
+        "situ_mxfp8_quant(Tensor x, Tensor group_list, int group_list_type=1, "
+        "float beta=4.0, float linear_beta=25.0) -> (Tensor, Tensor)");
+#endif
 
 #ifdef BUILD_CATLASS_MODULE
     m.def("catlass_matmul_basic(Tensor tensor_a, Tensor tensor_b, Tensor(a!) tensor_c, str? format_mode=None) -> ()");
@@ -215,6 +236,17 @@ TORCH_LIBRARY_FRAGMENT(npu, m)
 }  // namespace
 
 namespace {
+#ifdef SGL_KERNEL_ENABLE_A3_ONLY_OPS
+TORCH_LIBRARY_IMPL(npu, CatchAll, m)
+{
+    // These control-plane operators have no Tensor arguments, so backend
+    // dispatch cannot infer PrivateUse1 from their inputs.
+    m.impl("shm_allocator_create_and_register", TORCH_FN(sglang::npu_kernel::shm_allocator_create_and_register));
+
+    m.impl("shm_allocator_free_all", TORCH_FN(sglang::npu_kernel::shm_allocator_free_all));
+}
+#endif
+
 TORCH_LIBRARY_IMPL(npu, PrivateUse1, m)
 {
     m.impl("helloworld", TORCH_FN(sglang::npu_kernel::helloworld));
@@ -263,6 +295,12 @@ TORCH_LIBRARY_IMPL(npu, PrivateUse1, m)
         return sglang::npu_kernel::apply_token_bitmask(logits, bitmask, indices_or_empty);
     });
 
+#ifdef SGL_KERNEL_ENABLE_A3_ONLY_OPS
+    m.impl("unidex_copy", TORCH_FN(sglang::npu_kernel::unidex_copy));
+
+    m.impl("slot_map_lookup", TORCH_FN(sglang::npu_kernel::slot_map_lookup));
+#endif
+
     m.impl("causal_conv1d_update",
            [](const at::Tensor &x, const at::Tensor &weight, const at::Tensor &conv_state,
               const at::Tensor &conv_state_indices, const c10::optional<at::Tensor> &bias,
@@ -280,6 +318,7 @@ TORCH_LIBRARY_IMPL(npu, PrivateUse1, m)
                                                                     query_loc_or_empty, activation_mode, pad_slot_id);
            });
 
+    
     m.impl("causal_conv1d", [](const at::Tensor &x, const at::Tensor &weight, const at::Tensor &conv_states,
                                const c10::optional<at::Tensor> &bias, const c10::optional<at::Tensor> &query_start_loc,
                                const c10::optional<at::Tensor> &cache_indices,
@@ -319,6 +358,11 @@ TORCH_LIBRARY_IMPL(npu, PrivateUse1, m)
 
     m.impl("triangular_inverse", TORCH_FN(sglang::npu_kernel::tri_inv_col_sweep));
 
+#endif
+
+#ifdef SGL_KERNEL_ENABLE_A5_ONLY_OPS
+    m.impl("kv_compress_epilog", TORCH_FN(sglang::npu_kernel::kv_compress_epilog));
+    m.impl("situ_mxfp8_quant", TORCH_FN(sglang::npu_kernel::situ_mxfp8_quant));
 #endif
 
     m.impl("chunk_kda_fwd", TORCH_FN(sglang::npu_kernel::chunk_kda_fwd));

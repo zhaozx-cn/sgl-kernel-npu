@@ -158,17 +158,7 @@ at::Tensor lightning_indexer(
     c10::optional<c10::string_view> layout_key,
     c10::optional<int64_t> sparse_count, c10::optional<int64_t> sparse_mode);
 
-at::Tensor compressor(const at::Tensor &x, const at::Tensor &wkv,
-                      const at::Tensor &wgate, at::Tensor &state_cache,
-                      const at::Tensor &ape, const at::Tensor &norm_weight,
-                      const at::Tensor &rope_sin, const at::Tensor &rope_cos,
-                      const c10::optional<at::Tensor> &state_block_table,
-                      const c10::optional<at::Tensor> &cu_seqlens,
-                      const c10::optional<at::Tensor> &seqused,
-                      const c10::optional<at::Tensor> &start_pos,
-                      int64_t rope_head_dim, int64_t cmp_ratio, int64_t coff,
-                      double norm_eps, int64_t rotary_mode, int64_t cache_mode,
-                      int64_t state_cache_stride_dim0);
+#endif
 
 std::tuple<at::Tensor, at::Tensor> sparse_attn_sharedkv(
     const at::Tensor &q, const c10::optional<at::Tensor> &ori_kv,
@@ -198,6 +188,16 @@ std::tuple<at::Tensor, at::Tensor> sparse_attn_sharedkv(
  * is inversed.
  */
 at::Tensor tri_inv_col_sweep(const at::Tensor &tensor_in);
+
+#ifdef SGL_KERNEL_ENABLE_A5_ONLY_OPS
+void kv_compress_epilog(at::Tensor &kv_compress_cache, const at::Tensor &x,
+                        const at::Tensor &slot_mapping,
+                        int64_t quant_group_size, int64_t quant_mode,
+                        bool round_scale_flag, int64_t layout);
+
+std::tuple<at::Tensor, at::Tensor> situ_mxfp8_quant(
+    const at::Tensor &x, const at::Tensor &group_list,
+    int64_t group_list_type, double beta, double linear_beta);
 #endif
 
 #ifdef BUILD_CATLASS_MODULE
@@ -250,6 +250,55 @@ chunk_kda_fwd(const at::Tensor &q, const at::Tensor &k, const at::Tensor &v, con
               int64_t chunkSize, bool safeGate, double lowerBound, bool useGateInKernel,
               bool stateVFirst, bool outputFinalState, bool outputGk, bool outputW, bool outputU,
               bool outputQG, bool outputKg, bool outputVNew, bool outputH);
+#ifdef SGL_KERNEL_ENABLE_A3_ONLY_OPS
+/**
+ * @brief Sparse row copy: for each i where valid_mask[i] is true,
+ *   dst[dst_index[i]] = src[src_index[i]]
+ *
+ * Src and dst are viewed as byte buffers of shape [rows, block_bytes].
+ * Used by the Ascend NPU sparse KV cache path to move selected KV rows
+ * between host-slab and device buffers.
+ */
+void unidex_copy(const at::Tensor &src, at::Tensor &dst,
+                 const at::Tensor &src_index, const at::Tensor &dst_index,
+                 const at::Tensor &valid_mask, int64_t src_rows,
+                 int64_t dst_rows, int64_t block_bytes, int64_t max_copy,
+                 int64_t block_dim, c10::optional<int64_t> src_ptr,
+                 c10::optional<int64_t> dst_ptr);
+
+/**
+ * @brief Look up slot_map[req_indices[b], topk_indices[b, k]] for each query.
+ *
+ * Replaces the broadcast + eq + any + argmax pattern used for device cache
+ * lookup in the sparse KV cache path.
+ *
+ * Outputs (pre-allocated, written in place):
+ *   token_on_device[bs, topk]: int32 indicator, 1 for hit and 0 for miss
+ *   device_token_pos[bs, topk]: int32 slot position, or -1 for a miss
+ *
+ * block_dim=0 selects the default block count.
+ */
+void slot_map_lookup(const at::Tensor &slot_map, const at::Tensor &req_indices,
+                     const at::Tensor &topk_indices,
+                     at::Tensor &token_on_device, at::Tensor &device_token_pos,
+                     int64_t block_dim);
+
+/**
+ * @brief Create host shared memory and register it to the NPU device.
+ *
+ * Returns:
+ *   host pointer as int64_t
+ *   device-visible pointer as int64_t
+ */
+std::tuple<int64_t, int64_t>
+shm_allocator_create_and_register(int64_t size, int64_t device_id,
+                                  c10::string_view name);
+
+/**
+ * @brief Unregister and free all shared-memory entries for one device.
+ */
+void shm_allocator_free_all(int64_t device_id);
+#endif
 
 } // namespace npu_kernel
 
