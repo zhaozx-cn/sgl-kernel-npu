@@ -1054,7 +1054,13 @@ std::tuple<at::Tensor, std::optional<EventHandle>, std::optional<std::function<v
     int64_t expert_shared_type = 0;
     int64_t global_bs = num_max_dispatch_tokens_per_rank * num_ranks;
     int64_t out_dtype = 0;
-    int64_t comm_quant_mode = 0;
+    // A5's low-latency combine kernel already implements per-block INT8
+    // communication quantization. Keep the existing BF16 path as the
+    // default and expose the quantized path only through an explicit switch
+    // so accuracy/performance can be validated independently.
+    int enable_int8_combine = get_value_from_env("DEEPEP_LOW_LATENCY_COMBINE_INT8", 0);
+    EP_HOST_ASSERT(enable_int8_combine == 0 || enable_int8_combine == 1);
+    int64_t comm_quant_mode = enable_int8_combine == 1 ? 2 : 0;
     int64_t group_list_type = 0;
     bool isLayered = false;
     char *comm_alg;
