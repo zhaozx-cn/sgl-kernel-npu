@@ -21,7 +21,7 @@ HOST_API std::tuple<at::Tensor, at::Tensor> situ_mxfp8_quant(
     TORCH_CHECK(x.dim() == 2, "x must be 2D [capacity, 2 * hidden], got dim=", x.dim());
     TORCH_CHECK(x.scalar_type() == at::kBFloat16, "x must be BF16, got ", x.scalar_type());
     TORCH_CHECK(x.is_contiguous(), "x must be contiguous");
-    TORCH_CHECK(x.size(0) > 0 && x.size(1) == 6144,
+    TORCH_CHECK(x.size(1) == 6144,
                 "the first A5 kernel supports x shape [capacity, 6144], got [",
                 x.size(0), ", ", x.size(1), "]");
     TORCH_CHECK(group_list.dim() == 1 && group_list.numel() > 0,
@@ -41,6 +41,9 @@ HOST_API std::tuple<at::Tensor, at::Tensor> situ_mxfp8_quant(
 
     auto payload = at::empty({rows, kOutputCols}, x.options().dtype(at::kFloat8_e4m3fn));
     auto scales = at::empty({rows, kOutputCols / 64, 2}, x.options().dtype(at::kFloat8_e8m0fnu));
+    if (rows == 0) {
+        return std::make_tuple(payload, scales);
+    }
 
     auto platform = platform_ascendc::PlatformAscendCManager::GetInstance();
     uint32_t block_dim = static_cast<uint32_t>(platform->GetCoreNumAiv());
