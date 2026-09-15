@@ -80,12 +80,14 @@ jobs:
               - tests/python/sgl_kernel_npu/test_transfer_kv_dim_exchange.py
             speculative:
               - csrc/build_tree/**
+              - python/sgl_kernel_npu/sgl_kernel_npu/dspark/**
               - python/sgl_kernel_npu/sgl_kernel_npu/sample/**
               - python/sgl_kernel_npu/sgl_kernel_npu/speculative/**
               - tests/python/sgl_kernel_npu/test_build_tree.py
               - tests/python/sgl_kernel_npu/test_verify_tree.py
               - tests/python/sgl_kernel_npu/test_apply_token_bitmask.py
               - tests/python/sgl_kernel_npu/test_argmax_softmax_prob.py
+              - tests/python/sgl_kernel_npu/test_dspark_top1.py
             mamba:
               - csrc/causal_conv1d/**
               - csrc/causal_conv1d_update/**
@@ -104,6 +106,8 @@ jobs:
               - tests/python/sgl_kernel_npu/test_chunk_gdn_triton.py
               - tests/python/sgl_kernel_npu/test_recurrent_gated_delta_rule.py
               - tests/python/sgl_kernel_npu/test_fused_gdn_gating_without_sigmoid.py
+              - tests/python/sgl_kernel_npu/test_kda_ragged.py
+              - tests/python/sgl_kernel_npu/test_kda_target_verify.py
               - tests/python/sgl_kernel_npu/test_solve_tril.py
               - tests/python/sgl_kernel_npu/test_triangular_inverse.py
             fused:
