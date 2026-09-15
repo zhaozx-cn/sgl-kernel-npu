@@ -70,6 +70,18 @@ def test_cumulative_int64():
     _run_case(0, torch.int64)
 
 
+def test_empty_capacity():
+    x = torch.empty((0, 6144), dtype=torch.bfloat16, device="npu")
+    counts = torch.zeros(8, dtype=torch.int64, device="npu")
+
+    payload, scales = situ_mxfp8_quant(x, counts, 1)
+
+    assert payload.shape == (0, 3072)
+    assert payload.dtype == torch.float8_e4m3fn
+    assert scales.shape == (0, 48, 2)
+    assert scales.dtype == torch.float8_e8m0fnu
+
+
 def benchmark():
     torch.manual_seed(11)
     capacity = 32768
