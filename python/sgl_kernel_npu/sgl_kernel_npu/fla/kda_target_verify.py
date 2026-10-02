@@ -20,6 +20,7 @@ def _kda_target_verify_kernel(
     snapshot_indices_ptr,
     out_ptr,
     scale,
+    lower_bound,
     stride_q_token: tl.constexpr,
     stride_q_head: tl.constexpr,
     stride_q_dim: tl.constexpr,
@@ -52,6 +53,7 @@ def _kda_target_verify_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
     GATES_ARE_PREACTIVATED: tl.constexpr,
+    USE_LOWER_BOUND: tl.constexpr,
 ):
     pid_batch = tl.program_id(0)
     pid_hv = tl.program_id(1)
@@ -82,10 +84,10 @@ def _kda_target_verify_kernel(
         other=0.0,
     ).to(tl.float32)
 
-    A_log = tl.zeros((), dtype=tl.float32)
+    exp_A = tl.zeros((), dtype=tl.float32)
     dt_bias = tl.zeros((BK,), dtype=tl.float32)
     if not GATES_ARE_PREACTIVATED:
-        A_log = tl.load(A_log_ptr + k_head).to(tl.float32)
+        exp_A = tl.exp(tl.load(A_log_ptr + k_head).to(tl.float32))
         dt_bias = tl.load(
             dt_bias_ptr + k_head * K + offset_k,
             mask=mask_k,
@@ -139,12 +141,16 @@ def _kda_target_verify_kernel(
             beta = beta_input
         else:
             gate_input = a + dt_bias
-            softplus = tl.where(
-                gate_input <= 20.0,
-                tl.log(1.0 + tl.exp(gate_input)),
-                gate_input,
-            )
-            gate = tl.exp(-tl.exp(A_log) * softplus)
+            if USE_LOWER_BOUND:
+                log_gate = lower_bound * tl.sigmoid(exp_A * gate_input)
+            else:
+                softplus = tl.where(
+                    gate_input <= 20.0,
+                    tl.log(1.0 + tl.exp(gate_input)),
+                    gate_input,
+                )
+                log_gate = -exp_A * softplus
+            gate = tl.exp(log_gate)
             beta = 1.0 / (1.0 + tl.exp(-beta_input))
 
         state *= gate[None, :]
@@ -188,16 +194,20 @@ def kda_target_verify_npu(
     cache_steps: int,
     scale: Optional[float] = None,
     gates_are_preactivated: Optional[bool] = None,
+    lower_bound: Optional[float] = None,
 ) -> torch.Tensor:
     """KDA fixed-width target verification with per-step state snapshots.
 
     The persistent and intermediate state layout is the Ascend KDA layout
     ``[..., H_v, V, K]``. The persistent cache is read-only.
 
-    When ``gates_are_preactivated`` is true, ``a`` is the log-decay
-    ``-exp(A_log) * softplus(raw_a + dt_bias)`` and ``b`` is already sigmoid
-    activated. Both gate tensors may include the SGLang leading singleton.
-    When the flag is omitted, a paired leading singleton selects this mode.
+    When ``gates_are_preactivated`` is true, ``a`` is the already computed
+    log-decay and ``b`` is already sigmoid activated. Otherwise both tensors
+    are raw: ``lower_bound`` selects the K3 safe gate
+    ``lower_bound * sigmoid(exp(A_log) * (a + dt_bias))``; when it is absent,
+    the log-decay is ``-exp(A_log) * softplus(a + dt_bias)``. Both gate tensors
+    may include the SGLang leading singleton. When the flag is omitted, a
+    paired leading singleton selects the preactivated mode.
     """
     if q.ndim != 4 or k.ndim != 4 or v.ndim != 4:
         raise ValueError("q, k, and v must have shape [1, tokens, heads, dim]")
@@ -234,8 +244,10 @@ def kda_target_verify_npu(
         raise ValueError("a must have shape [tokens, H_k, K]")
     if tuple(b.shape) != (q.shape[1], h_v):
         raise ValueError("b must have shape [tokens, H_v]")
+    # K3 stores A_log as [1, 1, H_k, 1] and dt_bias as [H_k * K].
+    # The kernel reads both as flat buffers, so validate element counts.
     if not gates_are_preactivated and (
-        A_log.numel() != h_k or tuple(dt_bias.shape) != (h_k, key_dim)
+        A_log.numel() != h_k or dt_bias.numel() != h_k * key_dim
     ):
         raise ValueError("A_log and dt_bias shapes do not match KDA heads")
     if initial_state_source.ndim != 4 or tuple(initial_state_source.shape[1:]) != (
@@ -288,6 +300,8 @@ def kda_target_verify_npu(
         scale = key_dim**-0.5
     if scale <= 0:
         raise ValueError("scale must be positive")
+    if gates_are_preactivated and lower_bound is not None:
+        raise ValueError("lower_bound must already be reflected in preactivated gates")
 
     out = torch.empty((1, q.shape[1], h_v, value_dim), dtype=v.dtype, device=v.device)
     bk = triton.next_power_of_2(key_dim)
@@ -309,6 +323,7 @@ def kda_target_verify_npu(
         intermediate_state_indices,
         out,
         scale,
+        lower_bound if lower_bound is not None else 0.0,
         q.stride(1),
         q.stride(2),
         q.stride(3),
@@ -341,6 +356,7 @@ def kda_target_verify_npu(
         BK=bk,
         BV=bv,
         GATES_ARE_PREACTIVATED=gates_are_preactivated,
+        USE_LOWER_BOUND=lower_bound is not None,
         num_warps=1,
         num_stages=3,
         multibuffer=False,
