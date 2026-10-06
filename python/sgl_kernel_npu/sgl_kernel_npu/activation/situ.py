@@ -131,9 +131,40 @@ def _situ_and_mul_kernel(
     else:
         total_rows = N_ROWS
 
-    # rows distributed across vector cores (manual split + early return for over-provision).
-    block_size = (total_rows - 1) // NUM_CORES + 1
     pid = tl.program_id(0)
+    h_offs = tl.arange(0, BLOCK_H)
+
+    if not HAS_GROUP_LIST:
+        # Dense/shared SiTU has no cross-column dependency. Schedule whole
+        # hidden tiles across AIVs, but derive row/tile once per program tile.
+        # A flattened element schedule makes every lane pay div/mod and was
+        # slower than the row-persistent kernel at K3 verify shapes.
+        tiles_per_row: tl.constexpr = tl.cdiv(HALF_COLS, BLOCK_H)
+        total_tiles = N_ROWS * tiles_per_row
+        for tile_idx in range(pid, total_tiles, NUM_CORES):
+            row_idx = tile_idx // tiles_per_row
+            h_start = (tile_idx - row_idx * tiles_per_row) * BLOCK_H
+            h_idx = h_start + h_offs
+            mask = h_idx < HALF_COLS
+            row_off = row_idx.to(tl.int64) * TOTAL_COLS
+            gate = tl.load(x_ptr + row_off + h_idx, mask=mask, other=0.0).to(tl.float32)
+            up = tl.load(x_ptr + row_off + HALF_COLS + h_idx, mask=mask, other=0.0).to(
+                tl.float32
+            )
+            situ_a = BETA * libdevice.tanh(gate * INV_BETA) * tl.sigmoid(gate)
+            if DO_LINEAR_BETA:
+                up = LINEAR_BETA * libdevice.tanh(up * INV_LINEAR_BETA)
+            out = situ_a * up
+            tl.store(
+                out_ptr + row_idx.to(tl.int64) * HALF_COLS + h_idx,
+                out.to(out_ptr.dtype.element_ty),
+                mask=mask,
+            )
+        return
+
+    # Grouped rows keep the row-persistent schedule because total_rows is
+    # device-resident in group_list and cannot size the launch grid on host.
+    block_size = (total_rows - 1) // NUM_CORES + 1
     row_begin = pid * block_size
     if row_begin >= total_rows:
         return
@@ -142,7 +173,6 @@ def _situ_and_mul_kernel(
     # H-tile over the OUTPUT dim (HALF_COLS): out[i] only needs gate[i]=x[i] and
     # up[i]=x[d+i], so every [h:h+BLOCK_H] tile is self-contained -- no full-row resident,
     # which is what keeps large d (e.g. 33792) within UB. gate = first half, up = second half.
-    h_offs = tl.arange(0, BLOCK_H)
     for row_idx in range(row_begin, row_end):
         # int64 row offset: row_idx * stride stays int32 by default on triton-ascend
         # (no auto-promote), which overflows when N*d is large (e.g. N=32768, d=33792).
@@ -277,6 +307,43 @@ def situ_and_mul_quant(
     return out.reshape(*x.shape[:-1], half_cols), scale
 
 
+@triton.jit
+def _situ_and_mul_narrow_dense_kernel(
+    x,
+    out,
+    N_ROWS,
+    HALF_COLS: tl.constexpr,
+    BETA: tl.constexpr,
+    INV_BETA: tl.constexpr,
+    DO_LINEAR_BETA: tl.constexpr,
+    LINEAR_BETA: tl.constexpr,
+    INV_LINEAR_BETA: tl.constexpr,
+    BLOCK_ROWS: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    # Vectorize adjacent rows together. TP32 K3 shared experts have only 192
+    # columns, so serial row loops and 1024..8192-wide autotune tiles waste work.
+    columns = tl.arange(0, BLOCK_H)
+    row_offsets = tl.arange(0, BLOCK_ROWS)
+    for tile in range(
+        tl.program_id(0), tl.cdiv(N_ROWS, BLOCK_ROWS), tl.num_programs(0)
+    ):
+        rows = tile * BLOCK_ROWS + row_offsets
+        mask = (rows[:, None] < N_ROWS) & (columns[None, :] < HALF_COLS)
+        offsets = rows[:, None].to(tl.int64) * (2 * HALF_COLS) + columns[None, :]
+        gate = tl.load(x + offsets, mask=mask, other=0.0).to(tl.float32)
+        up = tl.load(x + offsets + HALF_COLS, mask=mask, other=0.0).to(tl.float32)
+        situ_a = BETA * libdevice.tanh(gate * INV_BETA) * tl.sigmoid(gate)
+        if DO_LINEAR_BETA:
+            up = LINEAR_BETA * libdevice.tanh(up * INV_LINEAR_BETA)
+        values = situ_a * up
+        tl.store(
+            out + rows[:, None].to(tl.int64) * HALF_COLS + columns[None, :],
+            values.to(out.dtype.element_ty),
+            mask=mask,
+        )
+
+
 def situ_and_mul(
     x,
     group_list=None,
@@ -336,6 +403,26 @@ def situ_and_mul(
     linear_beta_v = linear_beta if do_linear_beta else 1.0
 
     _, num_vectorcore = get_device_properties()
+    if not has_group_list and x_2d.dtype == torch.bfloat16 and 0 < h // 2 <= 512:
+        if s:
+            _situ_and_mul_narrow_dense_kernel[
+                (min(num_vectorcore, triton.cdiv(s, 4)),)
+            ](
+                x_2d,
+                out,
+                s,
+                HALF_COLS=h // 2,
+                BETA=beta,
+                INV_BETA=1.0 / beta,
+                DO_LINEAR_BETA=do_linear_beta,
+                LINEAR_BETA=linear_beta_v,
+                INV_LINEAR_BETA=(1.0 / linear_beta_v) if do_linear_beta else 1.0,
+                BLOCK_ROWS=4,
+                BLOCK_H=triton.next_power_of_2(h // 2),
+                num_warps=4,
+            )
+        return out.reshape(*x.shape[:-1], h // 2)
+
     _situ_and_mul_kernel[(num_vectorcore,)](
         x_2d,
         group_list_arg,
