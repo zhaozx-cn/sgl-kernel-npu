@@ -88,7 +88,10 @@ private:
     __aicore__ inline void Int8DequantProcess(LocalTensor<XType> &src);
     __aicore__ inline void ProcessConstantExpert(uint32_t tokenIndex, uint32_t const_expert_idx, float scaleVal);
     __aicore__ inline void ProcessCopyExpert(uint32_t tokenIndex, float scaleVal);
+    __aicore__ inline void PrefetchMoeExpert(uint32_t tokenIndexOffset, uint32_t topkId);
+    __aicore__ inline void AccumulateMoeExpert(float scaleVal);
     __aicore__ inline void ProcessMoeExpert(uint32_t tokenIndexOffset, uint32_t topkId, float scaleVal);
+    __aicore__ inline void ProcessMoeExpertsPipelined(uint32_t tokenIndexOffset, uint32_t scaleBegin);
     __aicore__ inline void ProcessExpert(uint32_t tokenIndex, uint32_t processLen);
     __aicore__ inline void ExpertScaleCopy(const uint32_t beginIndex, const uint32_t endIndex,
                                            const uint32_t tokenPerAivNum);
@@ -208,7 +211,7 @@ private:
     uint64_t baseWindSize_{0};
 
     TQueBind<QuePosition::VECIN, QuePosition::VECOUT, 1> moeQueue_;
-    TQue<QuePosition::VECIN, 1> moeSumQueue_;
+    TQue<QuePosition::VECIN, BUFFER_NUM> moeSumQueue_;
     TQueBind<QuePosition::VECIN, QuePosition::VECOUT, 1> gmTpSendCountQueue_;
     TQue<QuePosition::VECIN, 1> gmTpSendCountInQueue_;
     TQue<QuePosition::VECIN, 1> winTpSendCountInQueue_;
@@ -1095,12 +1098,10 @@ __aicore__ inline void MoeDistributeCombineV2A5<TemplateMC2TypeFunc>::ProcessCop
     PipeBarrier<PIPE_V>();
 }
 
-// 处理Moe专家
 template <TemplateMC2TypeClass>
-__aicore__ inline void MoeDistributeCombineV2A5<TemplateMC2TypeFunc>::ProcessMoeExpert(uint32_t tokenIndexOffset,
-                                                                                       uint32_t topkId, float scaleVal)
+__aicore__ inline void MoeDistributeCombineV2A5<TemplateMC2TypeFunc>::PrefetchMoeExpert(uint32_t tokenIndexOffset,
+                                                                                        uint32_t topkId)
 {
-    uint32_t processLen = axisH_;
     const DataCopyExtParams xScaleCopyParams{1U, static_cast<uint32_t>(tokenScaleCnt_ * sizeof(ExpandXType)), 0U, 0U,
                                              0U};
     const DataCopyExtParams expandXCopyParams{1U, static_cast<uint32_t>(hExpandXTypeSize_), 0U, 0U, 0U};
@@ -1115,16 +1116,47 @@ __aicore__ inline void MoeDistributeCombineV2A5<TemplateMC2TypeFunc>::ProcessMoe
         DataCopyPad(tmpUb, rowTmpGlobal_, expandXCopyParams, copyPadExtParams);
     }
     moeSumQueue_.EnQue(tmpUb);
-    tmpUb = moeSumQueue_.DeQue<XType>();
+}
+
+template <TemplateMC2TypeClass>
+__aicore__ inline void MoeDistributeCombineV2A5<TemplateMC2TypeFunc>::AccumulateMoeExpert(float scaleVal)
+{
+    LocalTensor<XType> tmpUb = moeSumQueue_.DeQue<XType>();
     if constexpr (IsInt8Quant) {
         Int8DequantProcess(tmpUb);
     }
-    Cast(rowTmpFloatLocal_, tmpUb, AscendC::RoundMode::CAST_NONE, processLen);
+    Cast(rowTmpFloatLocal_, tmpUb, AscendC::RoundMode::CAST_NONE, axisH_);
     PipeBarrier<PIPE_V>();
-    AscendC::Muls(mulBufLocal_, rowTmpFloatLocal_, scaleVal, processLen);
+    AscendC::Muls(mulBufLocal_, rowTmpFloatLocal_, scaleVal, axisH_);
     PipeBarrier<PIPE_V>();
-    AscendC::Add(sumFloatBufLocal_, sumFloatBufLocal_, mulBufLocal_, processLen);
+    AscendC::Add(sumFloatBufLocal_, sumFloatBufLocal_, mulBufLocal_, axisH_);
     moeSumQueue_.FreeTensor<XType>(tmpUb);
+}
+
+// 处理Moe专家
+template <TemplateMC2TypeClass>
+__aicore__ inline void MoeDistributeCombineV2A5<TemplateMC2TypeFunc>::ProcessMoeExpert(uint32_t tokenIndexOffset,
+                                                                                       uint32_t topkId, float scaleVal)
+{
+    PrefetchMoeExpert(tokenIndexOffset, topkId);
+    AccumulateMoeExpert(scaleVal);
+}
+
+template <TemplateMC2TypeClass>
+__aicore__ inline void MoeDistributeCombineV2A5<TemplateMC2TypeFunc>::ProcessMoeExpertsPipelined(
+    uint32_t tokenIndexOffset, uint32_t scaleBegin)
+{
+    // Keep two UB slots in flight: while V consumes expert N, MTE2 can fetch
+    // expert N+1. DeQue remains FIFO, so the FP32 accumulation order is
+    // identical to the original top-k loop.
+    PrefetchMoeExpert(tokenIndexOffset, 0U);
+    for (uint32_t topkId = 0U; topkId < axisK_; topkId++) {
+        if ((topkId + 1U) < axisK_) {
+            PrefetchMoeExpert(tokenIndexOffset, topkId + 1U);
+        }
+        float scaleVal = expertScalesLocal_.GetValue(scaleBegin + topkId);
+        AccumulateMoeExpert(scaleVal);
+    }
 }
 
 template <TemplateMC2TypeClass>
@@ -1167,17 +1199,37 @@ __aicore__ inline void MoeDistributeCombineV2A5<TemplateMC2TypeFunc>::ProcessExp
     uint32_t tokenIndexOffset = tokenIndex * (axisK_ + sharedExpertNum_);
 
     if ((zeroExpertNum_ + copyExpertNum_ + constExpertNum_) == 0U) {
-        for (uint32_t topkId = 0U; topkId < axisK_; topkId++) {
-            if (isInputExpertMaskFlag_) {
-                bool maskExpertFlag = expertMaskTensor_.GetValue(tokenIndex * axisK_ + topkId);
-                if (!maskExpertFlag) {
+        if constexpr (IsInt8Quant) {
+            if ((activeMaskBsCnt_ == 16U) && (axisH_ == 3584U) && (axisK_ == 16U) && !isInputExpertMaskFlag_) {
+                ProcessMoeExpertsPipelined(tokenIndexOffset, index);
+                index += axisK_;
+            } else {
+                for (uint32_t topkId = 0U; topkId < axisK_; topkId++) {
+                    if (isInputExpertMaskFlag_) {
+                        bool maskExpertFlag = expertMaskTensor_.GetValue(tokenIndex * axisK_ + topkId);
+                        if (!maskExpertFlag) {
+                            index++;
+                            continue;
+                        }
+                    }
+                    scaleVal = expertScalesLocal_.GetValue(index);
+                    ProcessMoeExpert(tokenIndexOffset, topkId, scaleVal);
                     index++;
-                    continue;
                 }
             }
-            scaleVal = expertScalesLocal_.GetValue(index);
-            ProcessMoeExpert(tokenIndexOffset, topkId, scaleVal);
-            index++;
+        } else {
+            for (uint32_t topkId = 0U; topkId < axisK_; topkId++) {
+                if (isInputExpertMaskFlag_) {
+                    bool maskExpertFlag = expertMaskTensor_.GetValue(tokenIndex * axisK_ + topkId);
+                    if (!maskExpertFlag) {
+                        index++;
+                        continue;
+                    }
+                }
+                scaleVal = expertScalesLocal_.GetValue(index);
+                ProcessMoeExpert(tokenIndexOffset, topkId, scaleVal);
+                index++;
+            }
         }
     } else {
         for (uint32_t topkId = 0U; topkId < axisK_; topkId++) {
