@@ -21,6 +21,8 @@ def _ascendc_impl(
     activation_mode,
     pad_slot_id,
     run_mode,
+    output_layout,
+    head_num,
 ):
     return torch.ops.npu.causal_conv1d(
         x,
@@ -34,6 +36,8 @@ def _ascendc_impl(
         activation_mode,
         pad_slot_id,
         run_mode,
+        output_layout,
+        head_num,
     )
 
 
@@ -50,6 +54,8 @@ def _torch_native_impl(
     activation_mode,
     pad_slot_id,
     run_mode,
+    output_layout,
+    head_num,
 ):
     global _torch_native_fn
     if _torch_native_fn is None:
@@ -68,6 +74,8 @@ def _torch_native_impl(
         activation_mode=activation_mode,
         pad_slot_id=pad_slot_id,
         run_mode=run_mode,
+        output_layout=output_layout,
+        head_num=head_num,
     )
 
 
@@ -85,6 +93,8 @@ def causal_conv1d(
     pad_slot_id=-1,
     run_mode=0,
     *,
+    output_layout="TOKEN_FIRST",
+    head_num=0,
     impl="auto",
 ):
     """Return y and update conv_states in place; auto selects ascendc.
@@ -109,10 +119,16 @@ def causal_conv1d(
         pad_slot_id: Int, default -1; matching explicit cache indices skip a
             sequence, leaving its state unchanged and output undefined.
         run_mode: Int, default 0; 1 selects integrated update, others prefill.
+        output_layout: TOKEN_FIRST (default) preserves the input shape.
+            HEAD_FIRST is supported only for run_mode=0.
+        head_num: Head count for HEAD_FIRST; must divide the channels
+            with head_dim divisible by 16. Must be 0 for TOKEN_FIRST.
         impl: Keyword-only str, "auto" (default), "ascendc" or "torch_native".
 
     Returns:
-        Newly allocated Tensor with x's shape, dtype and device.
+        Newly allocated Tensor with x's dtype and device. TOKEN_FIRST
+        preserves x's shape; HEAD_FIRST returns [H,T,D/H] or [B,H,L,D/H].
+        Both layouts are contiguous; input and state layouts do not change.
 
     All tensors share a device (NPU for ascendc). Empty optional tensors count
     as absent. State writes store raw input/history, preserving unused rows.
@@ -131,4 +147,6 @@ def causal_conv1d(
         activation_mode,
         pad_slot_id,
         run_mode,
+        output_layout,
+        head_num,
     )

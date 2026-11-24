@@ -31,6 +31,8 @@ def causal_conv1d(
     activation_mode=0,
     pad_slot_id=-1,
     run_mode=0,
+    output_layout="TOKEN_FIRST",
+    head_num=0,
 ):
     """Compute y and mutate the caller's state, using FP32 accumulation.
 
@@ -65,6 +67,18 @@ def causal_conv1d(
         raise ValueError("Only support width in [2,4]")
     if x.ndim == 2 and (query_start_loc is None or query_start_loc.shape[0] < 2):
         raise ValueError("query_start_loc must have at least 2 elements")
+
+    if output_layout == "HEAD_FIRST":
+        if run_mode != 0:
+            raise ValueError("HEAD_FIRST output is only supported for prefill (run_mode=0)")
+        if head_num <= 0 or dim <= 0 or dim % head_num != 0:
+            raise ValueError("HEAD_FIRST requires a positive head_num dividing the channel dimension")
+        if (dim // head_num) % 16 != 0:
+            raise ValueError("HEAD_FIRST requires head_dim divisible by 16")
+    elif output_layout != "TOKEN_FIRST":
+        raise ValueError("output_layout must be TOKEN_FIRST or HEAD_FIRST")
+    elif head_num != 0:
+        raise ValueError("TOKEN_FIRST requires head_num=0")
 
     # Empty optional tensors have the same meaning as absent optional tensors.
     query = (
@@ -146,4 +160,8 @@ def causal_conv1d(
             conv_states[cache, 2 : 2 + length] = tokens
         else:
             conv_states[cache, :history_len] = extended_raw[-history_len:]
+    if output_layout == "HEAD_FIRST":
+        if x.ndim == 2:
+            return y.reshape(x.shape[0], head_num, dim // head_num).permute(1, 0, 2).contiguous()
+        return y.reshape(x.shape[0], x.shape[1], head_num, dim // head_num).permute(0, 2, 1, 3).contiguous()
     return y

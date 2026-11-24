@@ -19,7 +19,7 @@ def causal_conv1d(
     bias=None, query_start_loc=None, cache_indices=None,
     has_initial_state=None, num_accepted_tokens=None,
     activation_mode=0, pad_slot_id=-1, run_mode=0,
-    *, impl="auto",
+    *, output_layout="TOKEN_FIRST", head_num=0, impl="auto",
 ):
     ...
 ```
@@ -127,4 +127,39 @@ y_update_ref = causal_conv1d(
     **inputs, conv_states=state_ref, run_mode=1, impl="torch_native"
 )
 print(y_update.shape, y_update_ref.shape)
+```
+
+## Prefill output layout
+
+`output_layout="TOKEN_FIRST"` (the default) preserves the existing output shape
+and requires `head_num=0`. All existing prefill, decode and speculative-update
+calls retain their behavior.
+
+For prefill (`run_mode=0`) only, `output_layout="HEAD_FIRST"` and a positive
+`head_num=H` return contiguous `[H,T,D/H]` for `[T,D]` input, or
+`[B,H,L,D/H]` for `[B,L,D]` input. `H` must divide `D`, and `D/H` must be
+divisible by 16. Other layout names, incompatible head counts, and head-first
+update calls are rejected before state mutation. The AscendC implementation
+writes the requested layout directly; it does not launch a separate transpose.
+
+Input, weights, bias, sequence boundaries and the mutable state keep their
+original layouts. Packed variable-length sequences share the global `T` axis;
+dense batches each have their own `[H,L,D/H]` span. Padded output positions
+remain undefined in either layout. Output dtype, activation and state updates
+are identical to token-first mode.
+
+For packed GDN/KDA QKV with equal per-head widths, set `H=Hq+Hk+Hv` using local
+head counts and split the output along axis 0. These Q/K/V views are contiguous
+and can be consumed as head-first inputs. Different per-head widths should use
+the default path; splitting dense `[B,H,L,D/H]` with `B>1` does not in general
+produce contiguous Q/K/V views. This operator does not change downstream gate
+layouts or select a model backend.
+
+```python
+y = causal_conv1d(
+    x, weight, state,
+    query_start_loc=query_start_loc,
+    output_layout="HEAD_FIRST", head_num=local_q_heads + local_k_heads + local_v_heads,
+)
+q, k, v = y.split([local_q_heads, local_k_heads, local_v_heads], dim=0)
 ```

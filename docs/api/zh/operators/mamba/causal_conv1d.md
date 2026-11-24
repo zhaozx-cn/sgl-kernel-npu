@@ -19,7 +19,7 @@ def causal_conv1d(
     bias=None, query_start_loc=None, cache_indices=None,
     has_initial_state=None, num_accepted_tokens=None,
     activation_mode=0, pad_slot_id=-1, run_mode=0,
-    *, impl="auto",
+    *, output_layout="TOKEN_FIRST", head_num=0, impl="auto",
 ):
     ...
 ```
@@ -119,3 +119,23 @@ y_update_ref = causal_conv1d(
 )
 print(y_update.shape, y_update_ref.shape)
 ```
+
+## Prefill 输出布局
+
+默认 `output_layout="TOKEN_FIRST", head_num=0` 保持已有输出形状与行为，
+兼容原有 prefill、decode 和投机验证调用。
+
+仅 `run_mode=0` 可以设置 `output_layout="HEAD_FIRST", head_num=H`：
+`[T,D]` 输入返回连续的 `[H,T,D/H]`，`[B,L,D]` 输入返回连续的
+`[B,H,L,D/H]`。H 必须为正且整除 D，D/H 必须是 16 的倍数。
+非法布局、head 参数和 head-first update 请求在修改状态之前报错。
+AscendC kernel 直接按目标布局写回，不额外启动转置算子。
+
+输入、权重、bias、序列边界和 conv_states 的布局不变，卷积数值、激活与
+状态更新语义不变。变长序列共享完整的 T 轴；普通 batch 各有独立的
+[H,L,D/H] 存储段。padding 对应的输出元素仍未定义。
+
+GDN/KDA 的 Q/K/V head_dim 相同时，可以用本地 TP 的 Hq+Hk+Hv 作为 H，
+将 packed 输出按第 0 维切成连续的 Q/K/V 视图。head_dim 不一致时使用默认路径。
+B>1 的普通 batch 按 head 维切分后不保证各分量整体连续。
+本接口不自动改变下游 gate 的布局，也不自动接入模型。

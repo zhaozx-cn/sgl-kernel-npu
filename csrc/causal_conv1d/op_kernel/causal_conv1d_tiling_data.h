@@ -62,5 +62,6 @@ struct CausalConv1dTilingData {
     int64_t runModeKey;
     int64_t widthKey;
     int64_t fnPlanKey;
+    int64_t headNum;  // 0: token-first; positive: prefill [H,T,D] / [B,H,S,D].
 };
 #endif  // CUSTOM_CAUSAL_CONV1D_TILING_DATA_H_

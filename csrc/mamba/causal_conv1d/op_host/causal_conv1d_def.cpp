@@ -48,6 +48,8 @@ public:
         this->Attr("activation_mode").AttrType(OPTIONAL).Int(0);
         this->Attr("pad_slot_id").AttrType(OPTIONAL).Int(-1);
         this->Attr("run_mode").AttrType(OPTIONAL).Int(0);
+        this->Attr("output_layout").AttrType(OPTIONAL).String("TOKEN_FIRST");
+        this->Attr("head_num").AttrType(OPTIONAL).Int(0);
         for (const auto *config : SGL_CANN_CONFIGS) {
             this->AICore().AddConfig(config);
         }

@@ -44,7 +44,7 @@ at::Tensor causal_conv1d(const at::Tensor &x, const at::Tensor &weight, const at
                          const c10::optional<at::Tensor> &cache_indices,
                          const c10::optional<at::Tensor> &has_initial_state,
                          const c10::optional<at::Tensor> &num_accepted_tokens, int64_t activation_mode,
-                         int64_t pad_slot_id, int64_t run_mode)
+                         int64_t pad_slot_id, int64_t run_mode, const std::string &output_layout, int64_t head_num)
 {
     // Keep required-input checks and metadata conversion in the Torch bridge.
     TORCH_CHECK(x.defined(), "x tensor must be defined");
@@ -70,6 +70,18 @@ at::Tensor causal_conv1d(const at::Tensor &x, const at::Tensor &weight, const at
     TORCH_CHECK(conv_states.size(2) == dim, "conv_states.shape[2] must equal dim");
     TORCH_CHECK(width >= 2 && width <= 4, "Only support width in [2,4]");
 
+    TORCH_CHECK(output_layout == "TOKEN_FIRST" || output_layout == "HEAD_FIRST",
+                "output_layout must be TOKEN_FIRST or HEAD_FIRST");
+    const bool headFirst = output_layout == "HEAD_FIRST";
+    if (headFirst) {
+        TORCH_CHECK(run_mode == 0, "HEAD_FIRST output is only supported for prefill (run_mode=0)");
+        TORCH_CHECK(head_num > 0 && dim > 0 && dim % head_num == 0,
+                    "HEAD_FIRST requires a positive head_num dividing the channel dimension");
+        TORCH_CHECK((dim / head_num) % 16 == 0, "HEAD_FIRST requires head_dim divisible by 16");
+    } else {
+        TORCH_CHECK(head_num == 0, "TOKEN_FIRST requires head_num=0");
+    }
+
     int64_t inputMode = (x.dim() == 2) ? 0 : 1;
 
     if (inputMode == 0) {
@@ -93,7 +105,14 @@ at::Tensor causal_conv1d(const at::Tensor &x, const at::Tensor &weight, const at
     const bool hasCache = HasElements(cache_indices);
     const bool hasInitial = HasElements(has_initial_state);
     const bool hasAccepted = HasElements(num_accepted_tokens);
-    auto y = at::empty_like(x);
+    at::Tensor y;
+    if (headFirst) {
+        const int64_t headDim = dim / head_num;
+        y = x.dim() == 2 ? at::empty({head_num, x.size(0), headDim}, x.options())
+                         : at::empty({x.size(0), head_num, x.size(1), headDim}, x.options());
+    } else {
+        y = at::empty_like(x);
+    }
     at::Tensor biasTensor, queryTensor, cacheTensor, initialTensor, acceptedTensor;
     if (hasBias) biasTensor = *bias;
     if (hasQuery) queryTensor = query_start_loc->to(at::kLong);
@@ -118,9 +137,11 @@ at::Tensor causal_conv1d(const at::Tensor &x, const at::Tensor &weight, const at
     auto yDesc = sgl_cann::tensor_descriptor(y, aclDtype);
     uint64_t workspaceSize = 0;
     aclOpExecutor *executor = nullptr;
+    // Generated ACLNN string attributes use char*, even for input attributes.
+    std::string layoutAttr = output_layout;
     const auto status = queryWorkspace(xDesc.get(), weightDesc.get(), stateDesc.get(), biasDesc.get(), queryDesc.get(),
                                        cacheDesc.get(), initialDesc.get(), acceptedDesc.get(), activation_mode,
-                                       pad_slot_id, run_mode, yDesc.get(), &workspaceSize, &executor);
+                                       pad_slot_id, run_mode, layoutAttr.data(), head_num, yDesc.get(), &workspaceSize, &executor);
     TORCH_CHECK(status == ACL_SUCCESS, "CausalConv1d workspace query failed: ", aclGetRecentErrMsg());
     TORCH_CHECK(workspaceSize <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()),
                 "ACLNN workspace size exceeds the Tensor allocation limit");
@@ -149,7 +170,8 @@ TORCH_LIBRARY_FRAGMENT(npu, m)
     m.def(
         "causal_conv1d(Tensor x, Tensor weight, Tensor(a!) conv_states, Tensor? bias=None, "
         "Tensor? query_start_loc=None, Tensor? cache_indices=None, Tensor? has_initial_state=None, "
-        "Tensor? num_accepted_tokens=None, int activation_mode=0, int pad_slot_id=-1, int run_mode=0) -> Tensor");
+        "Tensor? num_accepted_tokens=None, int activation_mode=0, int pad_slot_id=-1, int run_mode=0, "
+        "str output_layout=\"TOKEN_FIRST\", int head_num=0) -> Tensor");
 }
 TORCH_LIBRARY_IMPL(npu, PrivateUse1, m)
 {

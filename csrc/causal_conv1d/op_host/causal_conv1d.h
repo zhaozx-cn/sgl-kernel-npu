@@ -18,6 +18,7 @@
 #define CUSTOM_CAUSAL_CONV1D_HOST_H_
 
 #include <ATen/ATen.h>
+#include <string>
 #include "defines.h"
 
 namespace sglang {
@@ -27,7 +28,8 @@ HOST_API at::Tensor causal_conv1d_impl(const at::Tensor &x, const at::Tensor &we
                                        const at::Tensor &conv_states, const at::Tensor &query_start_loc,
                                        const at::Tensor &cache_indices, const at::Tensor &has_initial_state,
                                        const at::Tensor &num_accepted_tokens, int64_t activation_mode,
-                                       int64_t pad_slot_id, int64_t run_mode);
+                                       int64_t pad_slot_id, int64_t run_mode,
+                                       const std::string &output_layout, int64_t head_num);
 
 }  // namespace npu_kernel
 }  // namespace sglang

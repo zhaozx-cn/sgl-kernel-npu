@@ -70,6 +70,7 @@ struct CausalConv1dTilingKey {
     int64_t hasCacheIndices;
     int64_t hasInitialState;
     int64_t hasNumAccept;
+    int64_t headNum;
 };
 
 struct CausalConv1dTilingKeyHash {
@@ -97,6 +98,7 @@ struct CausalConv1dTilingKeyHash {
         h = HashCombine(h, static_cast<std::size_t>(k.hasCacheIndices));
         h = HashCombine(h, static_cast<std::size_t>(k.hasInitialState));
         h = HashCombine(h, static_cast<std::size_t>(k.hasNumAccept));
+        h = HashCombine(h, static_cast<std::size_t>(k.headNum));
         return h;
     }
 };
@@ -260,7 +262,8 @@ HOST_API at::Tensor causal_conv1d_impl(const at::Tensor &x, const at::Tensor &we
                                        const at::Tensor &conv_states, const at::Tensor &query_start_loc,
                                        const at::Tensor &cache_indices, const at::Tensor &has_initial_state,
                                        const at::Tensor &num_accepted_tokens, int64_t activation_mode,
-                                       int64_t pad_slot_id, int64_t run_mode)
+                                       int64_t pad_slot_id, int64_t run_mode,
+                                       const std::string &output_layout, int64_t head_num)
 {
     TORCH_CHECK(x.defined(), "x tensor must be defined");
     TORCH_CHECK(weight.defined(), "weight tensor must be defined");
@@ -285,6 +288,18 @@ HOST_API at::Tensor causal_conv1d_impl(const at::Tensor &x, const at::Tensor &we
     TORCH_CHECK(conv_states.size(2) == dim, "conv_states.shape[2] must equal dim");
     TORCH_CHECK(width >= MIN_WIDTH && width <= MAX_WIDTH, "Only support width in [2,4]");
 
+    TORCH_CHECK(output_layout == "TOKEN_FIRST" || output_layout == "HEAD_FIRST",
+                "output_layout must be TOKEN_FIRST or HEAD_FIRST");
+    const bool headFirst = output_layout == "HEAD_FIRST";
+    if (headFirst) {
+        TORCH_CHECK(run_mode == 0, "HEAD_FIRST output is only supported for prefill (run_mode=0)");
+        TORCH_CHECK(head_num > 0 && dim > 0 && dim % head_num == 0,
+                    "HEAD_FIRST requires a positive head_num dividing the channel dimension");
+        TORCH_CHECK((dim / head_num) % 16 == 0, "HEAD_FIRST requires head_dim divisible by 16");
+    } else {
+        TORCH_CHECK(head_num == 0, "TOKEN_FIRST requires head_num=0");
+    }
+
     int64_t inputMode = (x.dim() == 2) ? 0 : 1;
     int64_t seqLen = (inputMode == 1) ? x.size(1) : 0;
     int64_t batch = (inputMode == 1) ? x.size(0) : 0;
@@ -307,7 +322,14 @@ HOST_API at::Tensor causal_conv1d_impl(const at::Tensor &x, const at::Tensor &we
     bool hasNumAccept = num_accepted_tokens.defined() && num_accepted_tokens.numel() > 0;
     bool isBf16 = (dtype == at::kBFloat16);
 
-    at::Tensor y = at::empty_like(x);
+    at::Tensor y;
+    if (headFirst) {
+        const int64_t headDim = dim / head_num;
+        y = x.dim() == 2 ? at::empty({head_num, x.size(0), headDim}, x.options())
+                         : at::empty({x.size(0), head_num, x.size(1), headDim}, x.options());
+    } else {
+        y = at::empty_like(x);
+    }
 
     at::Tensor bias_tensor = hasBias ? bias : at::empty({0}, x.options());
     at::Tensor query_start_loc_tensor = (query_start_loc.defined() && query_start_loc.numel() > 0)
@@ -331,6 +353,7 @@ HOST_API at::Tensor causal_conv1d_impl(const at::Tensor &x, const at::Tensor &we
     ComputeTilingData(dim, cuSeqlen, seqLen, batch, inputMode, width, stateLen, numCacheLines, activationInt,
                       pad_slot_id, hasBias, hasCacheIndices, hasInitialState, hasNumAccept, isBf16, maxAivCore,
                       run_mode, tilingData);
+    tilingData.headNum = head_num;
 
     int64_t totalBlocks = (run_mode == CAUSAL_CONV1D_TPL_RUN_MODE_UPDATE)
                               ? (tilingData.batch * tilingData.baseDimCnt)
@@ -365,7 +388,8 @@ HOST_API at::Tensor causal_conv1d_impl(const at::Tensor &x, const at::Tensor &we
                               hasBias ? 1 : 0,
                               hasCacheIndices ? 1 : 0,
                               hasInitialState ? 1 : 0,
-                              hasNumAccept ? 1 : 0};
+                              hasNumAccept ? 1 : 0,
+                              head_num};
     uint64_t hashValue = CausalConv1dTilingKeyHash{}(key);
 
     static auto globalTilingBuffer = at::empty({tilingSize * static_cast<int64_t>(MAX_CAPTURE_NUM)},

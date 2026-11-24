@@ -107,7 +107,7 @@ TORCH_LIBRARY_FRAGMENT(npu, m)
         "causal_conv1d(Tensor x, Tensor weight, Tensor(a!) conv_states, Tensor? bias=None, "
         "Tensor? query_start_loc=None, Tensor? cache_indices=None, Tensor? has_initial_state=None, "
         "Tensor? num_accepted_tokens=None, int activation_mode=0, int pad_slot_id=-1, "
-        "int run_mode=0) -> Tensor");
+        "int run_mode=0, str output_layout=\"TOKEN_FIRST\", int head_num=0) -> Tensor");
 
     m.def(
         "recurrent_gated_delta_rule(Tensor mix_qkv, Tensor(a!) recurrent_state, Tensor beta, "
@@ -369,7 +369,7 @@ TORCH_LIBRARY_IMPL(npu, PrivateUse1, m)
                                const c10::optional<at::Tensor> &cache_indices,
                                const c10::optional<at::Tensor> &has_initial_state,
                                const c10::optional<at::Tensor> &num_accepted_tokens, int64_t activation_mode,
-                               int64_t pad_slot_id, int64_t run_mode) {
+                               int64_t pad_slot_id, int64_t run_mode, const std::string &output_layout, int64_t head_num) {
         // Handle optional parameters - convert None to empty tensors
         auto bias_or_empty = bias.has_value() ? *bias : at::empty({0}, x.options());
         auto query_start_loc_or_empty =
@@ -383,7 +383,8 @@ TORCH_LIBRARY_IMPL(npu, PrivateUse1, m)
 
         return sglang::npu_kernel::causal_conv1d_impl(
             x, weight, bias_or_empty, conv_states, query_start_loc_or_empty, cache_indices_or_empty,
-            has_initial_state_or_empty, num_accepted_tokens_or_empty, activation_mode, pad_slot_id, run_mode);
+            has_initial_state_or_empty, num_accepted_tokens_or_empty, activation_mode, pad_slot_id, run_mode,
+            output_layout, head_num);
     });
 
     m.impl("recurrent_gated_delta_rule", TORCH_FN(sglang::npu_kernel::recurrent_gated_delta_rule));

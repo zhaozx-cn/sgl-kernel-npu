@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <string>
 #include <limits>
 
 namespace optiling {
@@ -237,6 +238,16 @@ ge::graphStatus TilingCausalConv1d(gert::TilingContext *context)
     const int64_t activationMode = activation ? *activation : 0;
     const int64_t padSlotId = pad ? *pad : -1;
     const int64_t runMode = mode ? *mode : 0;
+    const char *layout = attrs ? attrs->GetStr(3) : nullptr;
+    const auto *heads = attrs ? attrs->GetAttrPointer<int64_t>(4) : nullptr;
+    const std::string outputLayout = layout ? layout : "TOKEN_FIRST";
+    const int64_t headNum = heads ? *heads : 0;
+    if (outputLayout == "HEAD_FIRST") {
+        if (runMode != 0 || headNum <= 0 || dim <= 0 || dim % headNum != 0 || (dim / headNum) % 16 != 0)
+            return ge::GRAPH_FAILED;
+    } else if (outputLayout != "TOKEN_FIRST" || headNum != 0) {
+        return ge::GRAPH_FAILED;
+    }
     const bool hasBias = HasElements(context, 3);
     const bool hasCacheIndices = HasElements(context, 5);
     const bool hasInitialState = HasElements(context, 6);
@@ -248,6 +259,7 @@ ge::graphStatus TilingCausalConv1d(gert::TilingContext *context)
     ComputeTilingData(dim, cuSeqlen, seqLen, batch, inputMode, width, state.GetDim(1), state.GetDim(0), activationMode,
                       padSlotId, hasBias, hasCacheIndices, hasInitialState, hasNumAccept, dtype == ge::DT_BF16,
                       maxAivCore, runMode, tilingData);
+    tilingData.headNum = headNum;
     const int64_t totalBlocks = runMode == CAUSAL_CONV1D_TPL_RUN_MODE_UPDATE
                                     ? tilingData.batch * tilingData.baseDimCnt
                                     : tilingData.tokenBlockCnt * tilingData.baseDimCnt;

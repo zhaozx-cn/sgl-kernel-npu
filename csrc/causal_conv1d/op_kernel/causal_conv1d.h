@@ -137,6 +137,8 @@ protected:
     __aicore__ inline void AdvanceFnLocalPartials(int32_t slotCurr, int32_t baseDim);
     __aicore__ inline void RunSeqFnRolling(int32_t start, int32_t len, int32_t channelStart, int32_t baseDim,
                                            int32_t dim);
+    __aicore__ inline void StoreOutput(const LocalTensor<T> &output, int32_t token,
+                                         int32_t channelStart, int32_t baseDim, int32_t dim);
     __aicore__ inline void RunSeq(int32_t start, int32_t len, int32_t channelStart, int32_t baseDim, int32_t dim);
     __aicore__ inline void WriteBackState(int32_t cacheIdx, int32_t len, int32_t channelStart, int32_t baseDim,
                                           int32_t dim);
@@ -463,9 +465,8 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::RunSeq(int32_t start, int32_t len, i
 
         SetFlag<HardEvent::V_MTE3>(outVToMte3Event_[outSlot]);
 
-        const int64_t outOffset = static_cast<int64_t>(start + t) * dim + channelStart;
         WaitFlag<HardEvent::V_MTE3>(outVToMte3Event_[outSlot]);
-        DataCopy(yGm[outOffset], outSlotT, baseDim);
+        StoreOutput(outSlotT, start + t, channelStart, baseDim, dim);
         if (t + 2 < len) {
             SetFlag<HardEvent::MTE3_V>(outMte3ToVEvent_[outSlot]);
         }
@@ -683,9 +684,8 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::RunSeqFnRolling(int32_t start, int32
 
         SetFlag<HardEvent::V_MTE3>(outVToMte3Event_[outSlot]);
 
-        const int64_t outOffset = static_cast<int64_t>(start + t) * dim + channelStart;
         WaitFlag<HardEvent::V_MTE3>(outVToMte3Event_[outSlot]);
-        DataCopy(yGm[outOffset], outSlotT, baseDim);
+        StoreOutput(outSlotT, start + t, channelStart, baseDim, dim);
         if (t + 2 < len) {
             SetFlag<HardEvent::MTE3_V>(outMte3ToVEvent_[outSlot]);
         }
@@ -694,6 +694,36 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::RunSeqFnRolling(int32_t start, int32
             SetFlag<HardEvent::V_MTE2>(inputVToMte2Event_);
         }
     }
+}
+
+template <CAUSAL_CONV1D_TEMPLATE_ARGS>
+__aicore__ inline void CAUSAL_CONV1D_CLASS::StoreOutput(
+    const LocalTensor<T> &output, int32_t token, int32_t channelStart, int32_t baseDim, int32_t dim)
+{
+    if constexpr (runModeKey == CAUSAL_CONV1D_TPL_RUN_MODE_FN) {
+        if (tilingData_->headNum > 0) {
+            const int64_t headDim = dim / tilingData_->headNum;
+            // Packed sequences share one physical token axis. Dense batches
+            // instead have a separate [H,S,D] output span for each batch row.
+            const int64_t tokens = tilingData_->inputMode == 0 ? tilingData_->cuSeqlen : tilingData_->seqLen;
+            const int64_t batchOffset = (token / tokens) * tokens * dim;
+            const int64_t tokenInBatch = token % tokens;
+            for (int32_t offset = 0; offset < baseDim;) {
+                const int64_t channel = channelStart + offset;
+                const int64_t head = channel / headDim;
+                const int64_t inHead = channel % headDim;
+                const int32_t remaining = baseDim - offset;
+                const int32_t count = static_cast<int32_t>(
+                    headDim - inHead < remaining ? headDim - inHead : remaining);
+                const int64_t outOffset = batchOffset + (head * tokens + tokenInBatch) * headDim + inHead;
+                // Host validation makes every segment a multiple of 32 bytes.
+                DataCopy(yGm[outOffset], output[offset], count);
+                offset += count;
+            }
+            return;
+        }
+    }
+    DataCopy(yGm[static_cast<int64_t>(token) * dim + channelStart], output, baseDim);
 }
 
 template <CAUSAL_CONV1D_TEMPLATE_ARGS>
