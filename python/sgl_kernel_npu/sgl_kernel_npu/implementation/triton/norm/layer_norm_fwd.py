@@ -10,6 +10,26 @@ from sgl_kernel_npu.implementation.triton.utils.triton_utils import (
     get_device_properties,
 )
 
+# Row tile budget in elements of the FP32 activation tile held in UB.
+# The kernel keeps the tile (FP32), its square/deviation, the broadcast
+# statistics and the compiler-inserted reduce/broadcast temp buffers alive at
+# the same time, so the budget is much smaller than the 192KB UB. 8192 elements
+# (32KB FP32 per tile) is the largest tile that still compiles with two
+# reduction temp buffers and leaves room for double buffering; larger tiles
+# either overflow UB (ascend910_9362 needs 3153920 bits for 256x128) or lose
+# more time to non-overlapped vector work than they save in loop overhead.
+_TILE_ELEMS = 8192
+# Cap on rows per tile: with a small feature size the element budget would
+# allow very tall tiles, but tall tiles grow the per-row reduce temp buffer and
+# the row-broadcast traffic without improving DMA efficiency.
+_MAX_BLOCK_M = 64
+
+
+def _choose_block_m(block_n: int, rows: int) -> int:
+    """Pick the row tile size for a BLOCK_N-wide FP32 tile."""
+    block_m = max(1, min(_MAX_BLOCK_M, _TILE_ELEMS // block_n))
+    return max(1, min(block_m, triton.next_power_of_2(rows)))
+
 
 @triton.heuristics({"HAS_BIAS": lambda args: args["B"] is not None})
 @triton.heuristics({"HAS_Z": lambda args: args["Z"] is not None})
@@ -35,15 +55,20 @@ def _layer_norm_fwd_1pass_kernel_npu(
     NORM_BEFORE_GATE: tl.constexpr,
     IS_RMS_NORM: tl.constexpr,
 ):
-    # Map the program id to the row of X and Y it should compute.
+    # One program owns a fixed grid-stride slice of the row blocks, so the grid
+    # only has to be as large as the vector core count.
     pid_m = tl.program_id(0)
     group = tl.program_id(1)
-    if not IS_RMS_NORM:
-        Mean += group * M
-    Rstd += group * M
+    X += group * N
+    Y += group * N
+    if HAS_Z:
+        Z += group * N
     W += group * N
     if HAS_BIAS:
         B += group * N
+    if not IS_RMS_NORM:
+        Mean += group * M
+    Rstd += group * M
 
     # Load weight once (broadcasted over rows)
     cols = tl.arange(0, BLOCK_N)
@@ -52,18 +77,19 @@ def _layer_norm_fwd_1pass_kernel_npu(
     if HAS_BIAS:
         b = tl.load(B + cols, mask=col_mask).to(tl.float32)
 
-    for row_block_start in tl.range(pid_m * BLOCK_M, M, BLOCK_M * tl.num_programs(0)):
+    n_row_blocks = tl.cdiv(M, BLOCK_M)
+    for row_block in tl.range(pid_m, n_row_blocks, tl.num_programs(0)):
         # Compute row indices for this program
-        rows = row_block_start + tl.arange(0, BLOCK_M)
+        rows = row_block * BLOCK_M + tl.arange(0, BLOCK_M)
         row_mask = rows < M
 
         # Load X: shape [BLOCK_M, BLOCK_N]
-        x_ptrs = X + rows[:, None] * stride_x_row + cols[None, :] + group * N
+        x_ptrs = X + rows[:, None] * stride_x_row + cols[None, :]
         x = tl.load(x_ptrs, mask=row_mask[:, None] & col_mask[None, :]).to(tl.float32)
 
         # Load Z if needed
         if HAS_Z:
-            z_ptrs = Z + rows[:, None] * stride_z_row + cols[None, :] + group * N
+            z_ptrs = Z + rows[:, None] * stride_z_row + cols[None, :]
             z = tl.load(z_ptrs, mask=row_mask[:, None] & col_mask[None, :]).to(
                 tl.float32
             )
@@ -98,7 +124,7 @@ def _layer_norm_fwd_1pass_kernel_npu(
             y *= z * tl.sigmoid(z)
 
         # Store output
-        y_ptrs = Y + rows[:, None] * stride_y_row + cols[None, :] + group * N
+        y_ptrs = Y + rows[:, None] * stride_y_row + cols[None, :]
         tl.store(y_ptrs, y, mask=row_mask[:, None] & col_mask[None, :])
 
 
@@ -128,14 +154,24 @@ def layer_norm_fwd(
         else None
     )
     rstd = torch.empty((ngroups * M,), dtype=torch.float32, device=x.device)
+    if M == 0:
+        return out, mean, rstd
 
     MAX_FUSED_SIZE = 65536 // x.element_size()
     BLOCK_N = min(MAX_FUSED_SIZE, triton.next_power_of_2(group_size))
 
-    # Choose BLOCK_M: e.g., 16, 32, 64 — depends on NPU vector core capacity
-    BLOCK_M = 48
+    # BLOCK_M is derived from the FP32 UB budget, not from the core count: the
+    # tile size that keeps the vector core busy is independent of how many
+    # cores run it (28 on 950PR, 40 on ascend910_9362, ...).
+    BLOCK_M = _choose_block_m(BLOCK_N, M)
     _, num_vectorcore = get_device_properties()
-    num_blocks_m = min(triton.cdiv(M, BLOCK_M), num_vectorcore)
+    # Keep the grid to a single wave so every core gets the same number of row
+    # blocks; the in-kernel grid-stride loop walks the rest.
+    num_blocks_m = min(triton.cdiv(M, BLOCK_M), max(1, num_vectorcore // ngroups))
+    # Double buffering only pays off when a core runs the loop more than once;
+    # for the small-M (decode) shapes the prologue/epilogue of the pipeline is
+    # pure overhead.
+    multibuffer = triton.cdiv(M, BLOCK_M) >= 2 * num_blocks_m
 
     # Now grid is (num blocks over M, num groups)
     grid = (num_blocks_m, ngroups)
@@ -157,6 +193,8 @@ def layer_norm_fwd(
         BLOCK_N=BLOCK_N,
         NORM_BEFORE_GATE=norm_before_gate,
         IS_RMS_NORM=is_rms_norm,
-        # Remove multibuffer if not needed
+        # Overlap the next tile's DMA with the current tile's statistics and
+        # epilogue (~10% at M=254208 on ascend910_9362).
+        multibuffer=multibuffer,
     )
     return out, mean, rstd
